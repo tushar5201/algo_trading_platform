@@ -1,0 +1,30 @@
+version: '3.9'
+
+services:
+  nginx:
+    ports:
+      - "80:80"
+      - "443:443"
+
+  frontend:
+    build: 
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend/src:/app/src
+  
+  backend:
+    build: 
+      dockerfile: Dockerfile
+    volumes:
+      - ./backend/src:/app/src
+    environment:
+      - NODE_ENV= development
+
+  python-engine:
+    volumes:
+      - ./python-engine/src:/app/src
+    environment:
+      - LOG_LEVEL=DEBUG
+    
