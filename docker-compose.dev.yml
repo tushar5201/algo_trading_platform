@@ -4,23 +4,22 @@ services:
   nginx:
     ports:
       - "80:80"
-      - "443:443"
 
-  frontend:
-    build: 
-      dockerfile: Dockerfile
-    ports:
-      - "5173:5173"
-    volumes:
-      - ./frontend/src:/app/src
+  # frontend:
+  #   build: 
+  #     dockerfile: Dockerfile.dev
+  #   ports:
+  #     - "5173:5173"
+  #   volumes:
+  #     - ./frontend/src:/app/src
   
   backend:
     build: 
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.dev
     volumes:
       - ./backend/src:/app/src
     environment:
-      - NODE_ENV= development
+      - NODE_ENV=development
 
   python-engine:
     volumes:

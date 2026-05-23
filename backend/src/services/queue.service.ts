@@ -9,7 +9,7 @@ export const publishStrategyRun = async (payload: Omit<StrategyRunJob, 'jobType'
         timestamp: new Date().toISOString(),
     } satisfies StrategyRunJob,
         {
-            jobId: `${payload.userId}-${payload.strategyName}:${Math.floor(Date.now() / 60000)}`,
+            jobId: `${payload.userId}-${payload.strategyName}-${Math.floor(Date.now() / 60000)}`,
         });
     console.log(`[Queue] Published strategy run job with ID: ${job.id} for user: ${payload.userId}`);
     return job.id!;

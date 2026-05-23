@@ -2,7 +2,7 @@
   "name": "algo-trading-backend",
   "version": "1.0.0",
   "scripts": {
-    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "dev": "ts-node-dev --respawn --transpile-only --project ./tsconfig.json src/server.ts",
     "build": "tsc",
     "start": "tsx src/server.ts"
   },

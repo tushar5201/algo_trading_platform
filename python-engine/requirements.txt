@@ -1,0 +1,30 @@
+
+# Queue
+bullmq==2.25.2
+
+# Database
+motor==3.4.0    # async mongodb
+pymongo==4.7.1
+
+# Redis
+#redis==5.3.1
+
+# Config
+pydantic-settings==2.2.1
+pydantic==2.7.1
+
+# Logging
+structlog==24.1.0
+
+# Crypto (Mirrors node AES-256-GCM)
+cryptography==42.0.7
+
+# HTTP (Kotak API calls)
+httpx==0.27.0
+
+# Data (Strategy Logic)
+numpy==1.26.4
+pandas==2.2.2
+
+# Dev
+watchfiles==0.21.0  # auto-restart on file change

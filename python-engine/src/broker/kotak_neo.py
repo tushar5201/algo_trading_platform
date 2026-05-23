@@ -1,337 +1,517 @@
-import asyncio
-import json
-from datetime import datetime, timezone, timedelta
-from typing import Optional
-
 import httpx
 import structlog
-from redis import credentials
-
-from broker.base_broker import BaseBroker
-from config.settings import settings
-from db.redis_client import get_redis
+import json
+import asyncio
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+from urllib.parse import urlencode
+from src.broker.base_broker import BaseBroker
+from src.config.settings import settings
 
 log = structlog.get_logger()
 
-
-# Kotak Neo API endpoints
-class KotakEndpoints:
-    LOGIN = "/login"
-    OTP_GENERATE = "/login/otp"
-    OTP_VALIDATE = "/login/otp/validate"
-    PLACE_ORDER = "/orders/place"
-    ORDER_STATUS = "/orders/{order_id}"
-    CANCEL_ORDER = "/orders/{order_id}/cancel"
-    POSITIONS = "/positions"
-    HOLDINGS = "/holdings"
-    MARGIN = "/margins"
-    ORDER_BOOK = "/orders"
+# ── Fixed login endpoints (never use baseUrl for these) ─────────────────────
+LOGIN_BASE         = "https://mis.kotaksecurities.com"
+TOTP_LOGIN_URL     = f"{LOGIN_BASE}/login/1.0/tradeApiLogin"
+MPIN_VALIDATE_URL  = f"{LOGIN_BASE}/login/1.0/tradeApiValidate"
+NEO_FIN_KEY        = "neotradeapi"
 
 
 class KotakNeoSession:
-    """Holds auth tokens for one trading session"""
+    """
+    Holds all tokens from the two-step auth flow.
+
+    Step 1 (TOTP):  view_token + view_sid
+    Step 2 (MPIN):  session_token + session_sid + base_url
+    Only session_token + session_sid are used for trading APIs.
+    """
 
     def __init__(
-            self,
-            access_token: str,
-            sid: str,
-            rid: str,
-            hsServerId: str,
-            expires_at: datetime,
+        self,
+        session_token: str,   # Auth header for all post-login APIs
+        session_sid: str,     # Sid header for all post-login APIs
+        rid: str,
+        base_url: str,        # dynamic — from MPIN validate response
+        expires_at: datetime,
     ):
-        self.access_token = access_token
-        self.sid = sid
-        self.rid = rid
-        self.hsServerId = hsServerId
-        self.expires_at = expires_at
+        self.session_token = session_token
+        self.session_sid   = session_sid
+        self.rid           = rid
+        self.base_url      = base_url.rstrip("/")
+        self.expires_at    = expires_at
 
     def is_valid(self) -> bool:
         return datetime.now(timezone.utc) < self.expires_at
 
     def to_dict(self) -> dict:
         return {
-            "access_token": self.access_token,
-            "sid": self.sid,
-            "rid": self.rid,
-            "hsServerId": self.hsServerId,
-            "expires_at": self.expires_at.isoformat(),
+            "session_token": self.session_token,
+            "session_sid":   self.session_sid,
+            "rid":           self.rid,
+            "base_url":      self.base_url,
+            "expires_at":    self.expires_at.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "KotakNeoSession":
         return cls(
-            access_token=data["access_token"],
-            sid=data["sid"],
-            rid=data["rid"],
-            hsServerId=data["hsServerId", ""],
-            expires_at=datetime.fromisoformat(data["expires_at"]),
+            session_token = data["session_token"],
+            session_sid   = data["session_sid"],
+            rid           = data["rid"],
+            base_url      = data["base_url"],
+            expires_at    = datetime.fromisoformat(data["expires_at"]),
         )
 
 
 class KotakNeoBroker(BaseBroker):
     """
-    Production Kotak Neo API adapter.
-    Auth flow:
-    1. authenticate(credentials) -> triggers OTP to mobile
-    2. complete_otp(otp) -> finalizes session
-    3. All order calls use cached session
-    Session cached in Redis for 8 hours (trading day).
+    Production Kotak Neo broker adapter.
+
+    Auth flow (TOTP — uses Google Authenticator, NOT SMS):
+      Step 1: totp_login(mobile, ucc, totp)
+              → returns view_token + view_sid
+
+      Step 2: mpin_validate(mpin, view_token, view_sid)
+              → returns session_token + session_sid + base_url
+              → session cached in Redis for 8 hours
+
+    All order/report APIs:
+      Headers: Auth=session_token, Sid=session_sid, neo-fin-key=neotradeapi
+      Body:    application/x-www-form-urlencoded  with  jData=<json_string>
     """
 
     SESSION_TTL_HOURS = 8
-    MAX_RETRIES = 3
-    RETRY_DELAY_SEC = 1.0
+    MAX_RETRIES       = 3
+    RETRY_DELAY_SEC   = 1.0
 
-    def __init__(self, user_id: str) -> None:
-        self.user_id = user_id
-        self.base_url = settings.kotak_base_url.rstrip("/")
-        self._session = Optional[KotakNeoSession] = None
-        self._credentials: dict = {}
+    def __init__(self, user_id: str):
+        self.user_id    = user_id
+        self._session:  Optional[KotakNeoSession] = None
+        self._access_token: str = ""  # from NEO dashboard — used for login + quotes
 
-        # HTTP client with sensible timeouts
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, connect=5.0),
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            }
+            timeout=httpx.Timeout(15.0, connect=5.0),
         )
 
-    # Authentication
+    # ────────────────────────────────────────────────────────────────────────
+    # Public auth methods
+    # ────────────────────────────────────────────────────────────────────────
+
     async def authenticate(self, credentials: dict) -> bool:
         """
-        Step 1 of auth: init session with kotak.
-        Credentials = { clientId, apiKey, apiSecret, mobileNumber, password }
-        Returns True if OTP was sent successfully.
+        Called by the worker before every strategy run.
+        Restores session from Redis cache if still valid.
+        Returns True if a valid cached session exists.
+        Returns False if user must go through TOTP → MPIN flow.
         """
-        self._credentials = credentials
+        self._access_token = credentials.get("apiKey", "")
 
-        # Check Redis cache first - avoid re-auth during same trading day
         cached = await self._load_session_from_cache()
         if cached and cached.is_valid():
             self._session = cached
             log.info("kotak.session_restored", user_id=self.user_id)
             return True
 
-        try:
-            resp = await self._post(
-                KotakEndpoints.LOGIN,
-                payload={
-                    "mobileNumber": credentials["mobileNumber"],
-                    "password": credentials["password"],
-                },
-                auth_headers=self._api_key_headers(credentials),
-            )
-            log.info(
-                "kotak.otp_sent",
-                user_id=self.user_id,
-                mobile=credentials.get("mobileNumber", "")[-4:],  # log last 4 only
-            )
-            return True
-        except KotakAPIError as e:
-            log.error("kotak.auth_failed", user_id=self.user_id, error=str(e))
-            raise
+        log.info("kotak.no_valid_session", user_id=self.user_id)
+        return False  # worker will raise — user must complete TOTP + MPIN
 
-    async def complete_otp(self, otp: str) -> KotakNeoSession:
-        """"
-        Step 2 of auth: validate OTP, get final session tokens.
-        Must be called after authenticate()
+    async def totp_login(
+        self,
+        mobile_number: str,
+        ucc: str,
+        totp: str,
+        access_token: str,
+    ) -> dict:
         """
-        if not self._credentials:
-            raise KotakAuthError("Call authenticate() before complete_otp()")
+        Step 1 of auth.
+        mobile_number: "+91XXXXXXXXXX"
+        ucc:           client code (e.g. "AB1234")
+        totp:          6-digit code from Google Authenticator
+        access_token:  from Kotak NEO API dashboard (plain, no Bearer)
 
-        resp = await self._post(
-            KotakEndpoints.OTP_VALIDATE,
-            payload={"mobileNumber": self._credentials["mobileNumber"], "otp": otp},
-            auth_headers=self._api_key_headers(self._credentials),
+        Returns { view_token, view_sid, rid }
+        """
+        self._access_token = access_token
+
+        resp = await self._post_json(
+            url=TOTP_LOGIN_URL,
+            payload={
+                "mobileNumber": mobile_number,
+                "ucc":          ucc,
+                "totp":         totp,
+            },
+            headers={
+                "Authorization": access_token,   # plain token — no Bearer
+                "neo-fin-key":   NEO_FIN_KEY,
+                "Content-Type":  "application/json",
+            },
         )
+
+        data = resp.get("data", {})
+        if data.get("status") == "error" or resp.get("status") == "error":
+            raise KotakAuthError(
+                resp.get("message") or data.get("message") or "TOTP login failed"
+            )
+
+        log.info(
+            "kotak.totp_login_success",
+            user_id=self.user_id,
+            k_type=data.get("kType"),
+        )
+
+        return {
+            "view_token": data["token"],
+            "view_sid":   data["sid"],
+            "rid":        data.get("rid", ""),
+        }
+
+    async def mpin_validate(
+        self,
+        mpin: str,
+        view_token: str,
+        view_sid: str,
+        access_token: str,
+    ) -> KotakNeoSession:
+        """
+        Step 2 of auth.
+        mpin:        user's 6-digit MPIN
+        view_token:  token from Step 1
+        view_sid:    sid from Step 1
+        access_token: from Kotak NEO dashboard
+
+        Returns KotakNeoSession with session_token, session_sid, base_url.
+        """
+        resp = await self._post_json(
+            url=MPIN_VALIDATE_URL,
+            payload={"mpin": mpin},
+            headers={
+                "Authorization": access_token,  # plain token — no Bearer
+                "neo-fin-key":   NEO_FIN_KEY,
+                "Content-Type":  "application/json",
+                "sid":           view_sid,
+                "Auth":          view_token,
+            },
+        )
+
+        data = resp.get("data", {})
+        if data.get("status") == "error" or resp.get("status") == "error":
+            raise KotakAuthError(
+                resp.get("message") or data.get("message") or "MPIN validation failed"
+            )
+
+        base_url = data.get("baseUrl", "")
+        if not base_url:
+            raise KotakAuthError("No baseUrl in MPIN validate response")
+
         session = KotakNeoSession(
-            access_token=resp["data"]["token"],
-            sid=resp["data"]["sid"],
-            rid=resp["data"]["rid"],
-            hsServerId=resp["data"].get("hsServerId", ""),
-            expires_at=datetime.now(timezone.utc) + timedelta(hours=self.SESSION_TTL_HOURS),
+            session_token = data["token"],
+            session_sid   = data["sid"],
+            rid           = data.get("rid", ""),
+            base_url      = base_url,
+            expires_at    = datetime.now(timezone.utc) + timedelta(hours=self.SESSION_TTL_HOURS),
         )
+
         self._session = session
         await self._cache_session(session)
 
-        log.info("kotak.authenticated", user_id=self.user_id)
+        log.info(
+            "kotak.mpin_validate_success",
+            user_id=self.user_id,
+            base_url=base_url,
+            expires_at=session.expires_at.isoformat(),
+        )
         return session
 
-    # Order Placement
+    # ────────────────────────────────────────────────────────────────────────
+    # Order placement — BaseBroker interface
+    # ────────────────────────────────────────────────────────────────────────
+
     async def place_order(
-            self,
-            symbol: str,
-            side: str,
-            qty: int,
-            price: float,
-            order_type: str,
-            product_type: str,
-            exchange: str
+        self,
+        symbol: str,        # pTrdSymbol from scrip master e.g. "ITBEES-EQ"
+        side: str,          # "BUY" | "SELL"
+        qty: int,
+        price: float,       # 0.0 = market order
+        order_type: str,    # "MARKET" | "LIMIT" | "SL" | "SL-M"
+        product_type: str,  # "MIS" | "NRML" | "CNC"
+        exchange: str,      # "nse_cm" | "nse_fo" | "bse_cm" etc.
     ) -> dict:
         """
         Place order via Kotak Neo API.
-        Returns: {order_id, status, price, ...}
+
+        CRITICAL: body is x-www-form-urlencoded with a single 'jData' field
+        containing a JSON string. NOT a JSON POST body.
         """
         self._ensure_session()
-        # Map internal types to kotak api values
-        kotak_transaction_type = "B" if side == "BUY" else "S"
-        kotak_order_type = self._map_order_type(order_type)
-        kotak_product = self._map_product_type(product_type)
 
-        payload = {
-            "am": "YES",  # After Market
-            "dq": "0",  # disclosed qty
-            "es": exchange,  # NSE / NFO / BSE
-            "mp": "0",  # market protection
-            "pc": kotak_product,  # MIS / CNC / NRML
-            "pf": "N",  # P&F order
-            "pr": str(price) if price > 0 else "0",  # price
-            "pt": kotak_order_type,  # MKT / L / SL / SL-M
-            "qt": str(qty),  # quantity
-            "rt": "DAY",  # Validity
-            "tp": "0",  # trigger price
-            "ts": symbol,  # trading symbol
-            "tt": kotak_transaction_type,  # B / S
+        j_data = {
+            "am":  "NO",                              # not AMO
+            "dq":  "0",                               # no disclosed qty
+            "es":  exchange,                          # nse_cm / nse_fo etc.
+            "mp":  "0",                               # no market protection
+            "pc":  product_type,                      # MIS / NRML / CNC
+            "pf":  "N",                               # not portfolio order
+            "pr":  str(price) if price > 0 else "0", # price
+            "pt":  self._map_order_type(order_type),  # MKT / L / SL / SL-M
+            "qt":  str(qty),
+            "rt":  "DAY",
+            "tp":  "0",                               # trigger price
+            "ts":  symbol,                            # trading symbol
+            "tt":  "B" if side == "BUY" else "S",
         }
+
         log.info(
             "kotak.place_order",
             user_id=self.user_id,
             symbol=symbol,
             side=side,
             qty=qty,
-            order_type=order_type,
+            exchange=exchange,
         )
+
         resp = await self._retry(
-            lambda: self._post(
-                KotakEndpoints.PLACE_ORDER,
-                payload=payload,
-                auth_headers=self._session_headers(),
+            lambda: self._post_form(
+                endpoint="/quick/order/rule/ms/place",
+                j_data=j_data,
             )
         )
-        order_id = resp.get("nOrdNo") or resp.get("data", {}).get("nOrderNo", "")
-        result = {
-            "order_id": order_id,
-            "status": resp.get("stat", ""),
-            "symbol": symbol,
-            "side": side,
-            "qty": qty,
-            "price": price,
-            "exchange": exchange,
-            "raw_response": resp
-        }
+
+        # Success: { "nOrdNo": "...", "stat": "Ok", "stCode": 200 }
+        order_id = resp.get("nOrdNo", "")
+        if not order_id:
+            raise KotakAPIError(
+                resp.get("emsg") or "Order placed but no order number returned"
+            )
+
         log.info(
             "kotak.order_placed",
             user_id=self.user_id,
             order_id=order_id,
             symbol=symbol,
+            side=side,
         )
-        return result
 
-    async def place_order_with_sl_tp(
-            self,
-            symbol: str,
-            side: str,
-            qty: int,
-            price: float,
-            order_type: str,
-            product_type: str,
-            exchange: str,
-            stop_loss: Optional[float] = None,
-            take_profit: Optional[float] = None,
+        return {
+            "order_id":  order_id,
+            "status":    resp.get("stat", ""),
+            "symbol":    symbol,
+            "side":      side,
+            "qty":       qty,
+            "price":     price,
+            "exchange":  exchange,
+            "raw":       resp,
+        }
+
+    async def place_order_with_sl(
+        self,
+        symbol: str,
+        side: str,
+        qty: int,
+        price: float,
+        order_type: str,
+        product_type: str,
+        exchange: str,
+        stop_loss: Optional[float] = None,
     ) -> dict:
         """
-        Places main order + optional SL order as bracket.
-        Kotak Neo handles SL as a separate cover order.
+        Places main order + separate SL-M order (opposite side).
+        Kotak Neo does not support native bracket orders for all segments,
+        so we place two separate orders.
         """
-        # Place main order first
-        main_result = await self.place_order(
+        # Main order
+        result = await self.place_order(
             symbol, side, qty, price, order_type, product_type, exchange
         )
 
-        # Place stop-loss order (opposite side)
-        if stop_loss and main_result.get("order_id"):
+        # SL order — opposite side, SL-M type
+        if stop_loss and result.get("order_id"):
             sl_side = "SELL" if side == "BUY" else "BUY"
             try:
                 sl_result = await self.place_order(
                     symbol=symbol,
                     side=sl_side,
                     qty=qty,
-                    price=stop_loss,
+                    price=0.0,           # SL-M = market when triggered
                     order_type="SL-M",
                     product_type=product_type,
                     exchange=exchange,
                 )
-                main_result["sl_order_id"] = sl_result["order_id"]
-                log.info(
-                    "kotak.sl_placed",
-                    sl_order_id=sl_result["order_id"],
-                    stop_loss=stop_loss,
-                )
+                result["sl_order_id"] = sl_result.get("order_id")
+                log.info("kotak.sl_order_placed", sl_order_id=sl_result.get("order_id"))
             except Exception as e:
-                log.error("kotak.sl_placed_failed", error=str(e))
-                main_result["sl_error"] = str(e)
-        return main_result
+                log.error("kotak.sl_order_failed", error=str(e))
+                result["sl_error"] = str(e)
 
-    # Order Management
-    async def get_order_status(self, order_id: str) -> dict:
+        return result
+
+    async def modify_order(
+        self,
+        order_no: str,
+        symbol: str,
+        exchange: str,
+        side: str,
+        qty: int,
+        price: float,
+        order_type: str,
+        product_type: str,
+        trigger_price: float = 0.0,
+    ) -> dict:
+        """Modify an existing open order."""
         self._ensure_session()
-        resp = await self._retry(
-            lambda: self._get(
-                KotakEndpoints.ORDER_STATUS.format(order_id),
-                auth_headers=self._session_headers()
-            )
-        )
-        data = resp.get("data", [{}])
-        order = data[0] if isinstance(data, list) and data else data
-        return {
-            "order_id": order_id,
-            "status": order.get("stat", "UNKNOWN"),
-            "symbol": order.get("trdSym", ""),
-            "qty": order.get("qty", 0),
-            "price": order.get("prc", 0),
-            "side": "BUY" if order.get("trnsTp") == "B" else "SELL",
-            "raw": order
+
+        j_data = {
+            "no":  order_no,
+            "ts":  symbol,
+            "es":  exchange,
+            "tt":  "B" if side == "BUY" else "S",
+            "qt":  str(qty),
+            "pr":  str(price),
+            "tp":  str(trigger_price),
+            "pt":  self._map_order_type(order_type),
+            "pc":  product_type,
+            "mp":  "0",
+            "dq":  "0",
+            "vd":  "DAY",
+            "am":  "NO",
         }
 
+        resp = await self._retry(
+            lambda: self._post_form(endpoint="/quick/order/vr/modify", j_data=j_data)
+        )
+
+        log.info("kotak.order_modified", order_no=order_no, new_order_no=resp.get("nOrdNo"))
+        return {"order_id": resp.get("nOrdNo", order_no), "raw": resp}
+
     async def cancel_order(self, order_id: str) -> bool:
+        """Cancel a regular pending order."""
         self._ensure_session()
+
+        j_data = {"on": order_id, "am": "NO"}
+
         try:
-            await self._post(
-                KotakEndpoints.CANCEL_ORDER.format(order_id),
-                payload={"on": order_id},
-                auth_headers=self._session_headers()
-            )
-            log.info("kotak.order_canceled", order_id=order_id)
+            await self._post_form(endpoint="/quick/order/cancel", j_data=j_data)
+            log.info("kotak.order_cancelled", order_id=order_id)
             return True
-        except Exception as e:
-            log.error("kotak.canceled_failed", order_id, error=str(e))
+        except KotakAPIError as e:
+            log.error("kotak.cancel_failed", order_id=order_id, error=str(e))
             return False
+
+    async def get_order_status(self, order_id: str) -> dict:
+        """Fetch order history for a specific order number."""
+        self._ensure_session()
+
+        j_data = {"nOrdNo": order_id}
+
+        resp = await self._post_form(
+            endpoint="/quick/order/history",
+            j_data=j_data,
+        )
+
+        data = resp.get("data", [])
+        latest = data[0] if data else {}
+
+        return {
+            "order_id": order_id,
+            "status":   latest.get("ordSt", "UNKNOWN"),
+            "symbol":   latest.get("trdSym", ""),
+            "qty":      latest.get("qty", 0),
+            "avg_price": latest.get("avgPrc", "0"),
+            "side":     "BUY" if latest.get("trnsTp") == "B" else "SELL",
+            "raw":      data,
+        }
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Portfolio / account APIs
+    # ────────────────────────────────────────────────────────────────────────
+
+    async def get_order_book(self) -> list[dict]:
+        """All orders for today."""
+        self._ensure_session()
+        resp = await self._get(endpoint="/quick/user/orders")
+        return resp.get("data", [])
+
+    async def get_trade_book(self) -> list[dict]:
+        """All executed trades for today."""
+        self._ensure_session()
+        resp = await self._get(endpoint="/quick/user/trades")
+        return resp.get("data", [])
 
     async def get_positions(self) -> list[dict]:
         self._ensure_session()
-        resp = await self._get(KotakEndpoints.POSITIONS, auth_headers=self._session_headers())
+        resp = await self._get(endpoint="/quick/user/positions")
         return resp.get("data", [])
 
-    async def get_margins(self) -> dict:
+    async def get_holdings(self) -> list[dict]:
         self._ensure_session()
-        resp = await self._get(KotakEndpoints.MARGIN, auth_headers=self._session_headers())
-        return resp.get("data", {})
-
-    async def get_order_book(self) -> list[dict]:
-        self._ensure_session()
-        resp = await self._get(KotakEndpoints.ORDER_BOOK, auth_headers=self._session_headers())
+        resp = await self._get(endpoint="/portfolio/v1/holdings")
         return resp.get("data", [])
 
-    # Session cache (Redis)
+    async def get_limits(
+        self,
+        seg: str = "ALL",
+        exch: str = "ALL",
+        prod: str = "ALL",
+    ) -> dict:
+        """Available margin / cash limits."""
+        self._ensure_session()
+        j_data = {"seg": seg, "exch": exch, "prod": prod}
+        return await self._post_form(endpoint="/quick/user/limits", j_data=j_data)
+
+    async def check_margin(
+        self,
+        exchange: str,
+        symbol_token: str,
+        price: float,
+        qty: int,
+        side: str,
+        order_type: str,
+        product_type: str,
+    ) -> dict:
+        """Check required margin before placing order."""
+        self._ensure_session()
+        j_data = {
+            "brkName": "KOTAK",
+            "brnchId": "ONLINE",
+            "exSeg":   exchange,
+            "prc":     str(price),
+            "prcTp":   self._map_order_type(order_type),
+            "prod":    product_type,
+            "qty":     str(qty),
+            "tok":     symbol_token,
+            "trnsTp":  "B" if side == "BUY" else "S",
+        }
+        return await self._post_form(endpoint="/quick/user/check-margin", j_data=j_data)
+
+    async def get_quotes(self, queries: list[str]) -> list[dict]:
+        """
+        Live market quotes.
+        queries: list of "exchange|symbol" e.g. ["nse_cm|11536", "nse_fo|Nifty 50"]
+
+        Uses access_token (not session_token) — no neo-fin-key, no Auth/Sid.
+        """
+        query_str = ",".join(queries)
+        url = f"{self._session.base_url}/script-details/1.0/quotes/neosymbol/{query_str}/all"
+
+        resp = await self._client.get(
+            url,
+            headers={"Authorization": self._access_token},
+        )
+        self._handle_response(resp)
+        return resp.json()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # Session cache
+    # ────────────────────────────────────────────────────────────────────────
+
     async def _cache_session(self, session: KotakNeoSession) -> None:
         try:
+            from src.db.redis_client import get_redis
             redis = get_redis()
-            key = f"kotak:session:{self.user_id}"
+            key   = f"kotak:session:{self.user_id}"
             await redis.setex(
                 key,
                 int(self.SESSION_TTL_HOURS * 3600),
-                json.dumps(session.to_dict())
+                json.dumps(session.to_dict()),
             )
             log.info("kotak.session_cached", user_id=self.user_id)
         except Exception as e:
@@ -340,137 +520,157 @@ class KotakNeoBroker(BaseBroker):
     async def _load_session_from_cache(self) -> Optional[KotakNeoSession]:
         try:
             from src.db.redis_client import get_redis
-            redis = await get_redis()
-            key = f"kotak:session:{self.user_id}"
-            raw = await redis.get(key)
+            redis = get_redis()
+            raw   = await redis.get(f"kotak:session:{self.user_id}")
             if raw:
                 return KotakNeoSession.from_dict(json.loads(raw))
         except Exception as e:
-            log.warning(f"kotak.cache_load_failed", error=str(e))
+            log.warning("kotak.cache_load_failed", error=str(e))
         return None
 
     async def invalidate_session(self) -> None:
         try:
+            from src.db.redis_client import get_redis
             redis = get_redis()
             await redis.delete(f"kotak:session:{self.user_id}")
             self._session = None
-            log.info("kotak.invalidate_session", user_id=self.user_id)
+            log.info("kotak.session_invalidated", user_id=self.user_id)
         except Exception as e:
             log.warning("kotak.invalidate_failed", error=str(e))
 
+    # ────────────────────────────────────────────────────────────────────────
     # HTTP helpers
-    async def _post(self, endpoint: str, payload: dict, auth_headers: dict) -> dict:
-        url = f"{self.base_url}{endpoint}"
-        log.debug("kotak.http_post", url=url)
+    # ────────────────────────────────────────────────────────────────────────
+
+    async def _post_json(self, url: str, payload: dict, headers: dict) -> dict:
+        """POST with JSON body — used only for login endpoints."""
+        resp = await self._client.post(url, json=payload, headers=headers)
+        return self._handle_response(resp)
+
+    async def _post_form(self, endpoint: str, j_data: dict) -> dict:
+        """
+        POST with x-www-form-urlencoded body containing jData field.
+        Used for ALL post-login order and report APIs.
+        """
+        self._ensure_session()
+        url = f"{self._session.base_url}{endpoint}"
+
+        # jData must be a JSON string, then URL-encoded in the form body
+        body = urlencode({"jData": json.dumps(j_data)})
+
         resp = await self._client.post(
             url,
-            json=payload,
-            headers={**self._client.headers, **auth_headers},
+            content=body,
+            headers={
+                **self._trading_headers(),
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
         )
         return self._handle_response(resp)
 
-    async def _get(self, endpoint: str, auth_headers: dict) -> dict:
-        url = f"{self.base_url}{endpoint}"
-        log.debug("kotak.http_get", url=url)
-        resp = await self._client.get(
-            url,
-            headers={**self._client.headers, **auth_headers},
-        )
+    async def _get(self, endpoint: str) -> dict:
+        """GET request — used for order book, positions, holdings."""
+        self._ensure_session()
+        url  = f"{self._session.base_url}{endpoint}"
+        resp = await self._client.get(url, headers=self._trading_headers())
         return self._handle_response(resp)
 
     def _handle_response(self, resp: httpx.Response) -> dict:
-        log.debug("kotak.response", status=resp.status_code)
+        log.debug("kotak.response", status=resp.status_code, url=str(resp.url))
+
         if resp.status_code == 401:
-            self._session = None  # force re-auth
-            raise KotakAuthError("Session expired- re-authentication required")
+            self._session = None
+            raise KotakAuthError("Session expired — user must re-authenticate")
 
-        if resp.status_code != 429:
-            raise KotakRateLimitError("Kotak API rate limit hit")
+        if resp.status_code == 429:
+            raise KotakRateLimitError("Kotak API rate limit — 10 req/sec max")
 
-        if resp.status_code != 500:
-            raise KotakAPIError(f"Kotak Server error: {resp.status_code}", resp.status_code)
+        if resp.status_code >= 500:
+            raise KotakAPIError(
+                f"Kotak server error {resp.status_code}: {resp.text[:200]}",
+                resp.status_code,
+            )
 
         try:
             data = resp.json()
         except Exception:
-            raise KotakAPIError(f"Invalid JSON response: {resp.text[:200]}")
-        # Kotak returns stat="Not_Ok" even on HTTP 200 for business errors
+            raise KotakAPIError(f"Non-JSON response: {resp.text[:200]}")
+
+        # Kotak returns stat="Not_Ok" even on HTTP 200
         if isinstance(data, dict):
-            if data.get("stat") == "Not_Ok":
+            stat = data.get("stat", "")
+            if stat == "Not_Ok":
                 raise KotakAPIError(
-                    data.get("errMsg") or data.get("message") or "Unknown Kotak error",
+                    data.get("emsg") or data.get("message") or "Kotak API error",
+                    data.get("stCode", 0),
                 )
+
         return data
 
     async def _retry(self, fn, retries: int = MAX_RETRIES) -> dict:
-        """Retry with exponential backoff. Re-authenticates on 401."""
-        last_error = None
+        last_err = None
         for attempt in range(retries):
             try:
                 return await fn()
             except KotakAuthError:
-                await self.invalidate_session()
-                raise
-            except KotakRateLimitError:
+                raise  # never retry auth errors
+            except KotakRateLimitError as e:
                 wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                log.warning("kotak.rate_limit", attempt=attempt, wait_sec=wait)
+                log.warning("kotak.rate_limit_retry", attempt=attempt, wait=wait)
                 await asyncio.sleep(wait)
-                last_error = KotakRateLimitError("Kotak API rate limit hit")
+                last_err = e
             except KotakAPIError as e:
                 if e.status_code and e.status_code >= 500:
                     wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                    log.warning("kotak.servver_error_retry", attempt=attempt, wait_sec=wait)
+                    log.warning("kotak.server_error_retry", attempt=attempt, wait=wait)
                     await asyncio.sleep(wait)
-                    last_error = e
+                    last_err = e
                 else:
-                    raise
+                    raise  # 400/422 = client error, no retry
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                log.warning("kotak.network_error", attempt=attempt, wait_sec=wait, error=str(e))
+                log.warning("kotak.network_retry", attempt=attempt, wait=wait, error=str(e))
                 await asyncio.sleep(wait)
-                last_error = KotakRateLimitError(f"Network error: {e}")
-        raise last_error or KotakAPIError("Max retries exceeded")
+                last_err = KotakAPIError(f"Network error: {e}")
 
-    # Header builders
-    def _api_key_headers(self, credentials: dict) -> dict:
-        return {
-            "Authorization": f"Bearer {credentials['apiKey']}:{credentials['apiSecret']}",
-        }
+        raise last_err or KotakAPIError("Max retries exceeded")
 
-    def _session_headers(self) -> dict:
-        if not self._session:
-            raise KotakAuthError("No valid session, call authenticate()")
+    def _trading_headers(self) -> dict:
+        """Headers for all post-login APIs."""
         return {
-            "Authorization": f"Bearer {self._session.access_token}",
-            "sid": self._session.sid,
-            "rid": self._session.rid,
-            "hsServerId": self._session.hsServerId,
+            "accept":       "application/json",
+            "Auth":         self._session.session_token,
+            "Sid":          self._session.session_sid,
+            "neo-fin-key":  NEO_FIN_KEY,
         }
 
     def _map_order_type(self, order_type: str) -> str:
-        return {"MARKET": "MKT", "LIMIT": "L", "SL": "SL", "SL-M": "SL-M"}.get(order_type, "MKT")
-
-    def _map_product_type(self, product_type: str) -> str:
-        return {"MIS": "MIS", "NRML": "NRML", "CNC": "CNC"}.get(product_type, "MIS")
+        return {
+            "MARKET": "MKT",
+            "LIMIT":  "L",
+            "SL":     "SL",
+            "SL-M":   "SL-M",
+        }.get(order_type.upper(), "MKT")
 
     def _ensure_session(self) -> None:
         if not self._session or not self._session.is_valid():
-            raise KotakAuthError("No valid session, call authenticate() + complete_otp()")
+            raise KotakAuthError(
+                "No valid session. User must complete TOTP → MPIN auth."
+            )
 
     async def close(self) -> None:
         await self._client.aclose()
 
-# Custom Exceptions
+
+# ── Exceptions ──────────────────────────────────────────────────────────────
 
 class KotakAPIError(Exception):
-    def __init__(self, message: str, status_code: int = 0) -> None:
+    def __init__(self, message: str, status_code: int = 0):
         super().__init__(message)
         self.status_code = status_code
 
-
 class KotakAuthError(KotakAPIError):
     pass
-
 
 class KotakRateLimitError(KotakAPIError):
     pass
