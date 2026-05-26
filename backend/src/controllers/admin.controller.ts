@@ -236,3 +236,24 @@ export const setGlobalKillSwitch = async (req: Request, res: Response): Promise<
         message: `Global kill switch ${parsed.data.isActive ? 'ACTIVATED' : 'DEACTIVATED'}.`
     });
 }
+
+export const setUserRiskLimits = async (req: Request, res: Response): Promise<void> => {
+    const schema = z.object({
+        maxDailyLoss: z.number().positive().optional(),
+        maxDailyTrades: z.number().int().positive().optional(),
+    });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) throw new AppError(400, parsed.error.errors[0].message);
+
+    const user = await User.findByIdAndUpdate(
+        req.params.userId,
+        {$set: {riskLimits: parsed.data}},
+        {new: true}
+    )
+    if(!user) throw new AppError(404, "User not found");
+    await writeAuditLog(
+        req.user!.userId, 'admin', 'SET_RISK_LIMITS',
+        req.params.userId, parsed.data
+    );
+    res.json({success: true, data: {riskLimits: user.riskLimits}});
+}

@@ -1,6 +1,8 @@
 import asyncio
 import json
 import structlog
+from bson import ObjectId
+from pymongo.auth import authenticate
 from redis import Redis
 
 from src.broker.base_broker import BaseBroker
@@ -8,7 +10,7 @@ from src.broker.kotak_neo import KotakNeoBroker, KotakAuthError
 from src.config.settings import settings
 from src.broker.mock_broker import MockBroker
 from src.db.mongo import get_db
-from src.execution.order_manager import execute_signal
+from src.execution.order_manager import OrderManager
 from src.strategies.base import StrategyContext
 from src.strategies.registry import get_strategy
 from src.utils.crypto import decrypt
@@ -17,8 +19,8 @@ from src.utils.market_data import get_market_snapshot
 log = structlog.get_logger()
 
 # BullMQ redis key patterns
-STRATEGY_QUEUE = "bull:strategy-runner:wait"
-TRADE_QUEUE = "bull:trade-executor:wait"
+STRATEGY_QUEUE = "strategy-runner"
+TRADE_QUEUE = "trade-executor"
 
 
 class StrategyWorker:
@@ -30,12 +32,13 @@ class StrategyWorker:
     def __init__(self, redis: Redis):
         self.redis = redis
         self.running = True
+        self.order_manager = OrderManager()
 
     async def start(self) -> None:
-        log.info("worker.started", queues=["strategy-runner", "trade-executor"])
+        log.info("worker.started", queues=[STRATEGY_QUEUE, TRADE_QUEUE])
         await asyncio.gather(
-            self._poll_queue("strategy-runner", self._handle_strategy_job),
-            self._poll_queue("trade-executor", self._handle_trade_job),
+            self._poll_queue(STRATEGY_QUEUE, self._handle_strategy_job),
+            self._poll_queue(TRADE_QUEUE, self._handle_trade_job),
         )
 
     async def _poll_queue(self, queue: str, handler) -> None:
@@ -46,7 +49,7 @@ class StrategyWorker:
         wait_key = f"bull:{queue}:wait"
         active_key = f"bull:{queue}:active"
 
-        log.info("worket.polling", queue=queue)
+        log.info("worker.polling", queue=queue)
 
         while self.running:
             try:
@@ -60,7 +63,7 @@ class StrategyWorker:
                 job_data = await self.redis.hgetall(job_key)
 
                 if not job_data:
-                    log.warning("worker.job_missing", queue=queue, job_id=job_id)
+                    log.warning("worker.job_missing", job_id=job_id)
                     await self.redis.lrem(active_key, 1, job_id)
                     continue
 
@@ -106,8 +109,6 @@ class StrategyWorker:
             auto_trading=auto_trading,
             credentials=credentials,
         )
-
-        # Get strategy instance from registry
         strategy = get_strategy(strategy_name, context)
 
         # Fetch market data for all symbols this strategy needs
@@ -120,41 +121,92 @@ class StrategyWorker:
         if not signal.is_actionable():
             log.info("strategy_job.hold", reason=signal.reason, user_id=user_id)
             return
+        log.info("strategy_job.signal", action=signal.action, symbol=signal.symbol, confidence=signal.confidence, reason=signal.reason, user_id=user_id)
         if not auto_trading:
-            log.info("strategy_job.signal_only", reason="Auto trading OFF", action=signal.action, symbol=signal.symbol)
             await self._log_signal_to_db(signal, user_id)
             return
 
         # Auto trading ON -> execute the trade
         # broker = MockBroker()
         # await broker.authenticate(credentials)
-        broker = await self._get_broker(user_id, credentials)
+        try:
+            broker = await self._get_broker(user_id, credentials)
+        except KotakAuthError as e:
+            log.error("strategy_job.auth_failed", user_id=user_id, error=str(e))
+            await self._notify_auth_required(user_id)
+            return
 
-        result = await execute_signal(signal, user_id, broker)
-        log.info("strategy_job.complete", result=result, user_id=user_id)
+        result = await self.order_manager.execute(signal=signal, user_id=user_id, broker=broker, credentials=credentials)
+        log.info("strategy_job.complete", result=result, user_id=user_id, strategy=signal.strategy_name)
 
     async def _handle_trade_job(self, data: dict, job_id: str) -> None:
         """
         Process a TRADE_EXECUTE job (future use for deferred trades).
         """
-        log.info("trade_job.received", data=data)
+        user_id = data["userId"]
+        trade_id = data.get("tradeId")
+        encrypted_creds = data["encryptedCredentials"]
+        log.info("trade_job.start", user_id=user_id, trade_id=trade_id)
+        db = get_db()
+        trade = await db.trades.find_one({"_id": ObjectId(trade_id)})
+
+        if not trade:
+            log.error("trade_job.not_found", trade_id=trade_id)
+            return
+        if trade["status"] != "PENDING":
+            log.info("trade_job.skip", trade_id=trade_id, status=trade["status"])
+            return
+        try:
+            credentials = json.loads(decrypt(encrypted_creds))
+            broker = await self._get_broker(user_id, credentials)
+        except Exception as e:
+            log.error(f"trade_job.broker_error", error=str(e))
+            return
+
+        try:
+            order_result = await broker.place_order(
+                symbol=trade["symbol"],
+                side=trade["side"],
+                qty=trade["qty"],
+                price=trade["price"],
+                order_type="MARKET",
+                product_type="MIS",
+                exchange=trade.get("exchange", "nse_fo")
+            )
+            await db.trades.update_one(
+                {"_id": trade["_id"]},
+                {"$set": {"orderId": order_result.get("orderId"), "status": "PENDING"}},
+            )
+            log.info("trade_job.order_placed", trade_id=trade_id)
+        except Exception as e:
+            log.error(f"trade_job.place_failed", trade_id=trade_id, error=str(e))
 
     async def _log_signal_to_db(self, signal, user_id: str) -> None:
         """Log signal-only(no trade) to DB for dashboard display."""
-        db = await get_db()
+        db = get_db()
         from bson import ObjectId
         from datetime import datetime, timezone
         await db.signals.insert_one({
-            "user_id": user_id,
+            "user_id": ObjectId(user_id),
             "strategyName": signal.strategy_name,
             "symbol": signal.symbol,
             "action": signal.action.value,
             "confidence": signal.confidence,
             "reason": signal.reason,
+            "stopLoss": signal.stopLoss,
+            "takeProfit": signal.takeProfit,
             "metadata": signal.metadata,
             "autoTraded": False,
             "createdAt": datetime.now(timezone.utc).isoformat(),
         })
+        log.info("signal.saved_only", user_id=user_id, symbol=signal.symbol, action=signal.action)
+
+    async def _notify_auth_required(self, user_id: str) -> None:
+        await self.redis.setex(
+            f"kotak:auth:error:{user_id}",
+            3600,
+            "Kotak session expired. Please re-authenticate via dashboard"
+        )
 
     async def _complete_job(self, queue: str, job_id: str, job_key: str, active_key: str) -> None:
         completed_key = f"bull:{queue}:completed"
@@ -182,20 +234,19 @@ class StrategyWorker:
         KotakNeoBroker restores session from Redis cache - no OTP needed
         if session is still valid.
         """
-        if settings.node_env == "development":
-            broker = MockBroker()
+        if settings.use_mock_broker:
+            broker = MockBroker(fail_rate=0.0)  # 0% failure in dev
             await broker.authenticate(credentials)
+            log.info("worker.using_mock_broker", user_id=user_id)
             return broker
 
-        broker = KotakNeoBroker(user_id)
-        try:
-            authenticated = await broker.authenticate(credentials)
-            if not authenticated:
-                raise KotakAuthError("Authentication returned False")
-            return broker
-        except KotakAuthError as e:
-            log.error("worker.broker_auth_failed", user_id=user_id, error=str(e))
-            raise Exception(
-                "Broker sessoin expired or not initialized."
-                "User must submit OTP via dashboard."
+        broker = KotakNeoBroker(user_id=user_id)
+        authenticated = await broker.authenticate(credentials)
+
+        if not authenticated:
+            raise KotakAuthError(
+                "No active Kotak session. User must complete TOTP → MPIN login."
             )
+
+        log.info("worker.using_kotak_broker", user_id=user_id)
+        return broker

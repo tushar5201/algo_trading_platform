@@ -4,14 +4,11 @@ import { requireRole } from "../middleware/roleGuard";
 import { asynchandler } from "../middleware/errorhandler";
 import {
     getAuthStatus,
-    getKotakSessionStatus,
     getMyStrategies,
     saveCredentials,
     submitMPIN,
     submitTOTP,
-    toggleAutoTrading,
-    triggerKotakOTP,
-    validateKotakOTP
+    toggleAutoTrading
 } from "../controllers/user.controller";
 
 const router = Router();

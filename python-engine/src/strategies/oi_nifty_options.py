@@ -39,8 +39,7 @@ class OINiftyOptionsStrategy(BaseStrategy):
             return self._hold("Zero call data")
 
         # pcr = total_put_oi / total_call_oi
-        pcr=0.5
-        self.log.info("oi.pcr_calculated", pcr=round(pcr, 3))
+        pcr = total_put_oi / total_call_oi
 
         # 2. Find ATM Strike
         ltp = snapshot.ltp
@@ -56,7 +55,7 @@ class OINiftyOptionsStrategy(BaseStrategy):
         self.log.info(
             "oi.analysis",
             atm_strike=atm_strike,
-            ltp=ltp,
+            ltp=round(ltp),
             pcr=round(pcr, 3),
             concentration=round(concentration, 3)
         )
@@ -65,9 +64,9 @@ class OINiftyOptionsStrategy(BaseStrategy):
         # High PCR + OI concentrated at call strikes -> bulls likely to win
         if pcr > PCR_BULLISH_THRESHOLD:
             # confidence = min(0.95, 0.5 + (pcr - PCR_BULLISH_THRESHOLD) * 0.5)
-            confidence = 0.60
+            confidence = min(0.95, 0.5 + (pcr - PCR_BULLISH_THRESHOLD) * 0.5)
             if confidence < MIN_CONFIDENCE:
-                return self._hold(f"PCR bullish but confidence too low: {confidence: .2f}")
+                return self._hold(f"PCR={pcr:.2f} bullish but confidence too low: {confidence: .2f}")
 
             # BUY slightly OTM call
             target_strike = atm_strike + 100
@@ -90,19 +89,19 @@ class OINiftyOptionsStrategy(BaseStrategy):
                 stop_loss=sl,
                 take_profit=tp,
                 metadata={
-                    "pcr":pcr,
-                    "atm_strike":atm_strike,
-                    "concentration":concentration,
-                    "ltp":ltp,
+                    "pcr": pcr,
+                    "atm_strike": atm_strike,
+                    "concentration": concentration,
+                    "ltp": ltp,
                 }
             )
 
         # Low PCR + OI concentrated at put strikes -> bears likely to win
         if pcr < PCR_BEARISH_THRESHOLD:
             # confidence = min(0.95, 0.5 + (pcr - PCR_BEARISH_THRESHOLD) * 0.5)
-            confidence = 0.60
+            confidence = min(0.95, 0.5 + (PCR_BEARISH_THRESHOLD - pcr) * 0.5)
             if confidence < MIN_CONFIDENCE:
-                return self._hold(f"PCR bearish but confidence too low: {confidence: .2f}")
+                return self._hold(f"PCR={pcr: .2f} bearish but confidence too low: {confidence: .2f}")
 
             # BUY slightly OTM call
             target_strike = atm_strike - 100
@@ -125,10 +124,10 @@ class OINiftyOptionsStrategy(BaseStrategy):
                 stop_loss=sl,
                 take_profit=tp,
                 metadata={
-                    "pcr":pcr,
-                    "atm_strike":atm_strike,
-                    "concentration":concentration,
-                    "ltp":ltp,
+                    "pcr": pcr,
+                    "atm_strike": atm_strike,
+                    "concentration": round(concentration, 3),
+                    "ltp": round(ltp, 2),
                 }
             )
 
@@ -145,7 +144,7 @@ class OINiftyOptionsStrategy(BaseStrategy):
             reason=reason,
         )
 
-    def _build_option_symbol(self, index:str, strike: float, option_type: str) -> str:
+    def _build_option_symbol(self, index: str, strike: float, option_type: str) -> str:
         """
         Build NSE NFO symbol string
         FORMAT: NIFTY24MAY22000CE
@@ -159,5 +158,5 @@ class OINiftyOptionsStrategy(BaseStrategy):
     def _get_option_ltp(self, chain: list[OptionChainEntry], strike: float, option_type: str) -> float:
         entry = next((e for e in chain if e.strike == strike), None)
         if not entry:
-            return 100.0 # fallback price
+            return 100.0  # fallback price
         return entry.call_ltp if option_type == "CE" else entry.put_ltp

@@ -12,6 +12,7 @@ router.get('/users', asynchandler(getAllUsers));
 router.patch('/users/:userId/status', asynchandler(updateUserStatus));
 router.post('/users/:userId/strategies', asynchandler(assignStrategies));
 router.patch('/users/:userId/toggle-trading', asynchandler(toggleUserTrading));
+router.post('/users/:userId/risk-limits', asynchandler(setGlobalKillSwitch));
 
 router.get('/trades', asynchandler(getAllTrades));
 

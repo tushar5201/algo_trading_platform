@@ -17,6 +17,10 @@ export interface IUser extends Document {
     isActive: boolean;
     createdAt: Date;
     updatedAt: Date;
+    riskLimits: {
+        maxDailyLoss: number,
+        maxDailyTrades: number
+    }
 }
 
 const UserSchema = new Schema<IUser> ({
@@ -61,6 +65,10 @@ const UserSchema = new Schema<IUser> ({
     isActive: {
         type: Boolean,
         default: true
+    },
+    riskLimits: {
+        maxDailyLoss: {type: Number, default: 50000},
+        maxDailyTrades: {type: Number, default: 50},
     }
 });
 

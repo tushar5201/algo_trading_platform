@@ -1,8 +1,8 @@
 import structlog
 
 from src.db.mongo import get_db
-from src.db.redis_client import get_redis
 from src.execution.signal import Signal
+from bson import ObjectId
 
 log = structlog.get_logger()
 
@@ -18,14 +18,19 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
     """
     if not signal.is_actionable():
         raise ValidationError("Signal is HOLD - not actionable")
+    if signal.qty <= 0:
+        raise ValidationError(f"Invalid qty {signal.qty}")
+    if not signal.symbol:
+        raise ValidationError(f"Empty symbol")
+    if signal.confidence < 0.5:
+        raise ValidationError(f"Invalid confidence {signal.confidence}")
 
     # 1. Global kill switch (Redis- Fastest check)
-    redis = get_redis()
     db = await get_db()
 
     global_kill = await db.kill_switches.find_one({"scope": "global", "isActive": True})
     if global_kill:
-        raise ValidationError(f"Global kill switch active: {global_kill.get('reason', 'no reason')}")
+        raise ValidationError(f"Global kill switch active: {global_kill.get('reason', '')}")
 
     # 2. Per User kill switch
     user_kill = await db.kill_switches.find_one({"scope": "user", "userId": user_id, "isActive": True})
@@ -33,10 +38,6 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
         raise ValidationError(f"User trading halted by admin")
 
     # 3. User still approved & active
-    from bson import ObjectId
-    cnt = await db.users.count_documents({})
-    if cnt == 0:
-        raise ValidationError("no cnt")
     user = await db.users.find_one({"_id": ObjectId(user_id)})
     if not user:
         raise ValidationError(f"User {user_id} not found")
@@ -47,14 +48,4 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
     if not user.get("autoTrading", False):
         raise ValidationError("User account is not active")
 
-    # 4. Signal sanity checks
-    if signal.qty <= 0:
-        raise ValidationError(f"Invalid qty {signal.qty}")
-    if not signal.symbol:
-        raise ValidationError(f"Invalid symbol {signal.symbol}")
-    if signal.price < 0:
-        raise ValidationError(f"Invalid price {signal.price}")
-    if signal.confidence < 0.5:
-        raise ValidationError(f"Invalid confidence {signal.confidence}")
-
-    log.info("signal.validated", symbol=signal.symbol, action=signal.action)
+    log.info("signal.validated", user_id=user_id, symbol=signal.symbol, action=signal.action)
