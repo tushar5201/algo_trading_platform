@@ -1,5 +1,5 @@
 import mongoose, { Document, Schema } from "mongoose";
-import { string } from "zod/v4";
+
 
 export type UserRole = 'admin' | 'user';
 export type UserStatus = 'PENDING' | 'APPROVED' | 'REJECTED';

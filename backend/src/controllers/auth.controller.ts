@@ -3,7 +3,6 @@ import { Request, Response } from "express";
 import { AppError } from "../middleware/errorhandler";
 import { comparePassword, hashPassword, signToken } from "../services/auth.service";
 import { User } from "../models/User";
-import { id } from "zod/v4/locales";
 import { writeAuditLog } from "../services/audit.service";
 
 const signupSchema = z.object({

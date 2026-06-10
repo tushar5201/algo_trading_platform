@@ -5,13 +5,13 @@ services:
     ports:
       - "80:80"
 
-  # frontend:
-  #   build: 
-  #     dockerfile: Dockerfile.dev
-  #   ports:
-  #     - "5173:5173"
-  #   volumes:
-  #     - ./frontend/src:/app/src
+  frontend:
+     build:
+       dockerfile: Dockerfile.dev
+     ports:
+       - "5173:5173"
+     volumes:
+       - ./frontend/src:/app/src
   
   backend:
     build: 

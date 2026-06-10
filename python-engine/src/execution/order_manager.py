@@ -20,7 +20,12 @@ POLL_MAX_ATTEMPTS = 15
 # Kotak order status values
 FILLED_STATUSES = {"filled", "complete", "traded"}
 REJECTED_STATUSES = {"rejected", "cancelled", "cancel"}
-PENDING_STATUSES = {"open", "pending", "open pending", "after market order req received"}
+PENDING_STATUSES = {
+    "open",
+    "pending",
+    "open pending",
+    "after market order req received",
+}
 
 
 class OrderManager:
@@ -28,11 +33,7 @@ class OrderManager:
         self.risk_manager = RiskManager()
 
     async def execute(
-            self,
-            signal: Signal,
-            user_id: str,
-            broker: BaseBroker,
-            credentials: dict
+        self, signal: Signal, user_id: str, broker: BaseBroker, credentials: dict
     ) -> dict:
         """
         Full trade lifecycle:
@@ -60,20 +61,24 @@ class OrderManager:
         risk = await self.risk_manager.check(signal, user_id)
         if not risk.passed:
             log.warning("order.risk_blocked", user_id=user_id, reason=risk.reason)
-            await self._write_audit(db, user_id, "TRADE_RISK_BLOCKED", {
-                "reason": risk.reason,
-                "symbol": signal.symbol
-            })
+            await self._write_audit(
+                db,
+                user_id,
+                "TRADE_RISK_BLOCKED",
+                {"reason": risk.reason, "symbol": signal.symbol},
+            )
             return {"success": False, "stage": "risk", "reason": risk.reason}
 
         # 3. Margin check
         margin_ok = await self._check_margin(broker, signal, credentials)
         if not margin_ok:
-            log.warning("order.insufficient_margin", user_id=user_id, symbol=signal.symbol)
+            log.warning(
+                "order.insufficient_margin", user_id=user_id, symbol=signal.symbol
+            )
             return {
                 "success": False,
                 "stage": "margin",
-                "reason": "Insufficient margin for this order"
+                "reason": "Insufficient margin for this order",
             }
 
         # 4. Create trade doc
@@ -106,23 +111,38 @@ class OrderManager:
             order_id = order_result.get("order_id", "")
         except KotakAuthError as e:
             await self._mark_failed(db, trade_id, str(e))
-            return {"success": False, "stage": "auth", "reason": str(e), "trade_id": trade_id}
+            return {
+                "success": False,
+                "stage": "auth",
+                "reason": str(e),
+                "trade_id": trade_id,
+            }
         except KotakAPIError as e:
             await self._mark_failed(db, trade_id, str(e))
-            await self._write_audit(db, user_id, "TRADE_ORDER_FAILED", {
+            await self._write_audit(
+                db,
+                user_id,
+                "TRADE_ORDER_FAILED",
+                {"trade_id": trade_id, "symbol": signal.symbol, "error": str(e)},
+            )
+            return {
+                "success": False,
+                "stage": "broker",
+                "reason": str(e),
                 "trade_id": trade_id,
-                "symbol": signal.symbol,
-                "error": str(e)
-            })
-            return {"success": False, "stage": "broker", "reason": str(e), "trade_id": trade_id}
+            }
         except Exception as e:
             await self._mark_failed(db, trade_id, str(e))
             log.error("order.unexpected_error", error=str(e), exc_info=True)
-            return {"success": False, "stage": "unknown", "reason": str(e), "trade_id": trade_id}
+            return {
+                "success": False,
+                "stage": "unknown",
+                "reason": str(e),
+                "trade_id": trade_id,
+            }
 
         await db.trades.update_one(
-            {"_id": ObjectId(trade_id)},
-            {"$set": {"orderId": order_id}}
+            {"_id": ObjectId(trade_id)}, {"$set": {"orderId": order_id}}
         )
         log.info("order.place", trade_id=trade_id, symbol=signal.symbol)
 
@@ -130,17 +150,22 @@ class OrderManager:
         fill_result = await self._poll_order_status(broker, order_id, trade_id)
         if not fill_result["filled"]:
             await self._mark_failed(db, trade_id, fill_result["reason"])
-            await self._write_audit(db, user_id, "TRADE_FILL_FAILED", {
-                "trade_id": trade_id,
-                "order_id": order_id,
-                "reason": fill_result["reason"]
-            })
+            await self._write_audit(
+                db,
+                user_id,
+                "TRADE_FILL_FAILED",
+                {
+                    "trade_id": trade_id,
+                    "order_id": order_id,
+                    "reason": fill_result["reason"],
+                },
+            )
             return {
                 "success": False,
                 "stage": "fill",
                 "reason": fill_result["reason"],
                 "trade_id": trade_id,
-                "order_id": order_id
+                "order_id": order_id,
             }
 
         # 7. Calculate PnL
@@ -160,22 +185,27 @@ class OrderManager:
                     "metadata": {
                         **signal.metadata,
                         "slOrderId": order_result.get("sl_order_id"),
-                        "fillResult": fill_result
-                    }
+                        "fillResult": fill_result,
+                    },
                 }
-            }
+            },
         )
 
         # 9. Audit log
-        await self._write_audit(db, user_id, "TRADE_EXECUTED", {
-            "trade_id": trade_id,
-            "order_id": order_id,
-            "symbol": signal.symbol,
-            "side": signal.action.value,
-            "qty": signal.qty,
-            "fill_price": fill_price,
-            "pnl": pnl,
-        })
+        await self._write_audit(
+            db,
+            user_id,
+            "TRADE_EXECUTED",
+            {
+                "trade_id": trade_id,
+                "order_id": order_id,
+                "symbol": signal.symbol,
+                "side": signal.action.value,
+                "qty": signal.qty,
+                "fill_price": fill_price,
+                "pnl": pnl,
+            },
+        )
 
         log.info(
             "order.complete",
@@ -196,7 +226,9 @@ class OrderManager:
         }
 
     # Helpers
-    async def _check_margin(self, broker: BaseBroker, signal: Signal, credentials: dict) -> bool:
+    async def _check_margin(
+        self, broker: BaseBroker, signal: Signal, credentials: dict
+    ) -> bool:
         """
         Returns True if margin is sufficient. Non-blocking on error.
         """
@@ -205,7 +237,9 @@ class OrderManager:
                 return True
             symbol_token = signal.metadata.get("symbol_token", "")
             if not symbol_token:
-                log.warning("order.margin_check_skipped", reason="No symbol token in metadata")
+                log.warning(
+                    "order.margin_check_skipped", reason="No symbol token in metadata"
+                )
                 return True
             result = await broker.check_margin(
                 exchange=signal.exchange.value,
@@ -221,8 +255,8 @@ class OrderManager:
             if rms_validated == "NOT_OK" and insuf_fund > 0:
                 log.warning(
                     "order.insufficient_margin",
-                    insuf_fund = insuf_fund,
-                    avl_margin=result.get("avlMrgn")
+                    insuf_fund=insuf_fund,
+                    avl_margin=result.get("avlMrgn"),
                 )
                 return False
             return True
@@ -230,7 +264,9 @@ class OrderManager:
             log.warning("order.margin_check_error", error=str(e))
             return True
 
-    async def _poll_order_status(self, broker: BaseBroker, order_id: str, trade_id: str) -> dict:
+    async def _poll_order_status(
+        self, broker: BaseBroker, order_id: str, trade_id: str
+    ) -> dict:
         """
         Poll kotak order status until filled / rejected / timeout
         Returns {filled: bool, reason: str, avg_price: float }
@@ -243,7 +279,7 @@ class OrderManager:
                 order_status = status.get("status", "").lower().strip()
                 log.debug(
                     "order.poll",
-                    attempt=attempt+1,
+                    attempt=attempt + 1,
                     order_id=order_id,
                     status=order_status,
                 )
@@ -251,10 +287,10 @@ class OrderManager:
                     avg_price = float(status.get("avg_price") or 0)
                     log.info("order.filled", order_id=order_id, avg_price=avg_price)
                     return {
-                        "fillled": True,
+                        "filled": True,
                         "reason": "Order filled",
                         "avg_price": avg_price,
-                        "status": order_status
+                        "status": order_status,
                     }
 
                 if order_status in REJECTED_STATUSES:
@@ -313,24 +349,21 @@ class OrderManager:
     async def _mark_failed(self, db, trade_id: str, error: str) -> None:
         await db.trades.update_one(
             {"_id": ObjectId(trade_id)},
-            {
-                "$set": {
-                    "status": "FAILED",
-                    "errorMessage": error
-                }
-            }
+            {"$set": {"status": "FAILED", "errorMessage": error}},
         )
         log.error("order.mark_failed", trade_id=trade_id, error=error)
 
     async def _write_audit(self, db, user_id: str, action: str, metadata: dict) -> None:
         try:
-            await db.audit_logs.insert_one({
-                "actorId": ObjectId(user_id),
-                "actorRolw": "system",
-                "action": action,
-                "targetId": None,
-                "metadata": metadata,
-                "createdAt": datetime.now(timezone.utc),
-            })
+            await db.audit_logs.insert_one(
+                {
+                    "actorId": ObjectId(user_id),
+                    "actorRole": "system",
+                    "action": action,
+                    "targetId": None,
+                    "metadata": metadata,
+                    "createdAt": datetime.now(timezone.utc),
+                }
+            )
         except Exception as e:
             log.error("order.audit_write_failed", error=str(e))

@@ -16,14 +16,14 @@ services:
     networks:
       - trading-net
   
-  # frontend:
-  #   build: 
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #   volumes:
-  #     - frontend_build:/app/dist
-  #   networks:
-  #     - trading-net
+  frontend:
+     build:
+       context: ./frontend
+       dockerfile: Dockerfile
+     volumes:
+       - frontend_build:/app/dist
+     networks:
+       - trading-net
   
   backend:
     build: 

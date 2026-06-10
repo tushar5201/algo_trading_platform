@@ -6,7 +6,6 @@ import { writeAuditLog } from "../services/audit.service";
 import { Strategy } from "../models/Strategy";
 import { publishStrategyRun } from "../services/queue.service";
 import { strategyQueue, tradeQueue } from "../queues";
-import { success } from "zod/v4";
 import { KillSwitch } from "../models/KillSwitch";
 import mongoose from "mongoose";
 
@@ -182,23 +181,33 @@ export const triggerStrategy = async (req: Request, res: Response): Promise<void
 }
 
 export const getQueueStatus = async (req: Request, res: Response): Promise<void> => {
-    const [strategyWaiting, strategyActive, strategyFailed] = await Promise.all([
-        strategyQueue.getWaitingCount(),
-        strategyQueue.getActiveCount(),
-        strategyQueue.getFailedCount()
+    const safeCount = async (fn: () => Promise<number>): Promise<number> => {
+        try {
+            return await fn();
+        } catch (error) {
+            return 0;
+        }
+    };
+    
+    const [strategyWaiting, strategyActive, strategyFailed, strategyCompleted] = await Promise.all([
+        safeCount(() => strategyQueue.getWaitingCount()),
+        safeCount(() => strategyQueue.getActiveCount()),
+        safeCount(() => strategyQueue.getFailedCount()),
+        safeCount(() => strategyQueue.getCompletedCount())
     ]);
 
-    const [tradeWaiting, tradeActive, tradeFailed] = await Promise.all([
-        tradeQueue.getWaitingCount(),
-        tradeQueue.getActiveCount(),
-        tradeQueue.getFailedCount()
+    const [tradeWaiting, tradeActive, tradeFailed, tradeCompleted] = await Promise.all([
+        safeCount(() => tradeQueue.getWaitingCount()),
+        safeCount(() => tradeQueue.getActiveCount()),
+        safeCount(() => tradeQueue.getFailedCount()),
+        safeCount(() => tradeQueue.getCompletedCount())
     ]);
 
     res.json({
         success: true,
         data: {
-            strategyRunner: { waiting: strategyWaiting, active: strategyActive, failed: strategyFailed },
-            tradeExecutor: { waiting: tradeWaiting, active: tradeActive, failed: tradeFailed }
+            strategyRunner: { waiting: strategyWaiting, active: strategyActive, failed: strategyFailed, completed: strategyCompleted },
+            tradeExecutor: { waiting: tradeWaiting, active: tradeActive, failed: tradeFailed, completed: tradeCompleted }
         }
     });
 }

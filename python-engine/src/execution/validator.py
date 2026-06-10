@@ -30,10 +30,14 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
 
     global_kill = await db.kill_switches.find_one({"scope": "global", "isActive": True})
     if global_kill:
-        raise ValidationError(f"Global kill switch active: {global_kill.get('reason', '')}")
+        raise ValidationError(
+            f"Global kill switch active: {global_kill.get('reason', '')}"
+        )
 
     # 2. Per User kill switch
-    user_kill = await db.kill_switches.find_one({"scope": "user", "userId": user_id, "isActive": True})
+    user_kill = await db.kill_switches.find_one(
+        {"scope": "user", "userId": ObjectId(user_id), "isActive": True}
+    )
     if user_kill:
         raise ValidationError(f"User trading halted by admin")
 
@@ -48,4 +52,6 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
     if not user.get("autoTrading", False):
         raise ValidationError("User account is not active")
 
-    log.info("signal.validated", user_id=user_id, symbol=signal.symbol, action=signal.action)
+    log.info(
+        "signal.validated", user_id=user_id, symbol=signal.symbol, action=signal.action
+    )

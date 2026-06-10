@@ -2,7 +2,7 @@ import { Router } from "express";
 import { authenticate } from "../middleware/auth";
 import { requireRole } from "../middleware/roleGuard";
 import { asynchandler } from "../middleware/errorhandler";
-import { assignStrategies, createStrategy, getAllUsers, getQueueStatus, listStrategies, setGlobalKillSwitch, toggleUserTrading, triggerStrategy, updateUserStatus } from "../controllers/admin.controller";
+import { assignStrategies, createStrategy, getAllUsers, getQueueStatus, listStrategies, setGlobalKillSwitch, setUserRiskLimits, toggleUserTrading, triggerStrategy, updateUserStatus } from "../controllers/admin.controller";
 import { getAllTrades } from "../controllers/trade.controller";
 
 const router = Router();
@@ -12,7 +12,7 @@ router.get('/users', asynchandler(getAllUsers));
 router.patch('/users/:userId/status', asynchandler(updateUserStatus));
 router.post('/users/:userId/strategies', asynchandler(assignStrategies));
 router.patch('/users/:userId/toggle-trading', asynchandler(toggleUserTrading));
-router.post('/users/:userId/risk-limits', asynchandler(setGlobalKillSwitch));
+router.post('/users/:userId/risk-limits', asynchandler(setUserRiskLimits));
 
 router.get('/trades', asynchandler(getAllTrades));
 

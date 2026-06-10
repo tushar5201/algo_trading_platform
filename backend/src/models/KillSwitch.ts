@@ -5,7 +5,7 @@ export interface IKillSwitch extends Document {
     userId: mongoose.Types.ObjectId | null;
     isActive: boolean;
     reason: string;
-    sortBy: mongoose.Types.ObjectId;
+    setBy: mongoose.Types.ObjectId;
 }
 
 const KillSwitchSchema = new mongoose.Schema<IKillSwitch>({
@@ -13,7 +13,7 @@ const KillSwitchSchema = new mongoose.Schema<IKillSwitch>({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     isActive: { type: Boolean, required: true },
     reason: { type: String, default: '' },
-    sortBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    setBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 }, {
     timestamps: true,
 });

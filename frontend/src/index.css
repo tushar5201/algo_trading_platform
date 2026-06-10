@@ -1,0 +1,158 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/forms";
+
+/* ── Dark mode via .dark class on <html> ─────────────────────────────────── */
+@variant dark (&:where(.dark, .dark *));
+
+/* ── Custom theme tokens ──────────────────────────────────────────────────── */
+@theme {
+    --font-sans: "Inter", system-ui, sans-serif;
+
+    --color-brand-50:  #eef2ff;
+    --color-brand-100: #e0e7ff;
+    --color-brand-400: #818cf8;
+    --color-brand-500: #6366f1;
+    --color-brand-600: #4f46e5;
+    --color-brand-700: #4338ca;
+    --color-brand-900: #1e1b4b;
+}
+
+/* ── Base ─────────────────────────────────────────────────────────────────── */
+@layer base {
+    *, *::before, *::after {
+        box-sizing: border-box;
+    }
+
+    html {
+        font-family: var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+        @apply bg-gray-50 text-gray-900;
+    }
+
+    .dark body {
+        @apply bg-gray-950 text-gray-100;
+    }
+
+    ::-webkit-scrollbar        { width: 6px; }
+    ::-webkit-scrollbar-track  { background: transparent; }
+    ::-webkit-scrollbar-thumb  {
+        @apply bg-gray-300 rounded-full;
+    }
+    .dark ::-webkit-scrollbar-thumb {
+        @apply bg-gray-700;
+    }
+}
+
+/* ── Component classes ────────────────────────────────────────────────────── */
+@layer components {
+
+    /* Card */
+    .card {
+        @apply bg-white border border-gray-200 rounded-2xl;
+    }
+    .dark .card {
+        @apply bg-gray-900 border-gray-800;
+    }
+
+    /* Input */
+    .input-base {
+        @apply w-full rounded-xl border border-gray-200 bg-gray-50
+        px-4 py-2.5 text-sm text-gray-900
+        placeholder-gray-400
+        outline-none
+        transition-all duration-150;
+    }
+    .input-base:focus {
+        @apply ring-2 ring-brand-500 border-transparent;
+    }
+    .dark .input-base {
+        @apply border-gray-700 bg-gray-800 text-gray-100 placeholder-gray-500;
+    }
+
+    /* Buttons */
+    .btn-primary {
+        @apply inline-flex items-center justify-center gap-2
+        rounded-xl bg-brand-600 px-5 py-2.5
+        text-sm font-medium text-white
+        shadow-sm transition-all duration-150
+        disabled:opacity-50 disabled:cursor-not-allowed;
+    }
+    .btn-primary:hover:not(:disabled) {
+        @apply bg-brand-700;
+    }
+
+    .btn-secondary {
+        @apply inline-flex items-center justify-center gap-2
+        rounded-xl border border-gray-200
+        bg-gray-100 px-5 py-2.5
+        text-sm font-medium text-gray-700
+        transition-all duration-150;
+    }
+    .btn-secondary:hover {
+        @apply bg-gray-200;
+    }
+    .dark .btn-secondary {
+        @apply border-gray-700 bg-gray-800 text-gray-300;
+    }
+    .dark .btn-secondary:hover {
+        @apply bg-gray-700;
+    }
+
+    .btn-danger {
+        @apply inline-flex items-center justify-center gap-2
+        rounded-xl bg-red-600 px-5 py-2.5
+        text-sm font-medium text-white
+        transition-all duration-150;
+    }
+    .btn-danger:hover {
+        @apply bg-red-700;
+    }
+
+    /* Label */
+    .label {
+        @apply block text-xs font-medium text-gray-600 mb-1.5;
+    }
+    .dark .label {
+        @apply text-gray-400;
+    }
+
+    /* Badges */
+    .badge-green {
+        @apply inline-flex items-center rounded-full px-2.5 py-0.5
+        text-xs font-medium
+        bg-emerald-100 text-emerald-800;
+    }
+    .dark .badge-green {
+        @apply bg-emerald-900/30 text-emerald-400;
+    }
+
+    .badge-red {
+        @apply inline-flex items-center rounded-full px-2.5 py-0.5
+        text-xs font-medium
+        bg-red-100 text-red-800;
+    }
+    .dark .badge-red {
+        @apply bg-red-900/30 text-red-400;
+    }
+
+    .badge-yellow {
+        @apply inline-flex items-center rounded-full px-2.5 py-0.5
+        text-xs font-medium
+        bg-amber-100 text-amber-800;
+    }
+    .dark .badge-yellow {
+        @apply bg-amber-900/30 text-amber-400;
+    }
+
+    .badge-blue {
+        @apply inline-flex items-center rounded-full px-2.5 py-0.5
+        text-xs font-medium
+        bg-blue-100 text-blue-800;
+    }
+    .dark .badge-blue {
+        @apply bg-blue-900/30 text-blue-400;
+    }
+}

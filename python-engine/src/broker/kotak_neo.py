@@ -11,10 +11,10 @@ from src.config.settings import settings
 log = structlog.get_logger()
 
 # ── Fixed login endpoints (never use baseUrl for these) ─────────────────────
-LOGIN_BASE         = "https://mis.kotaksecurities.com"
-TOTP_LOGIN_URL     = f"{LOGIN_BASE}/login/1.0/tradeApiLogin"
-MPIN_VALIDATE_URL  = f"{LOGIN_BASE}/login/1.0/tradeApiValidate"
-NEO_FIN_KEY        = "neotradeapi"
+LOGIN_BASE = "https://mis.kotaksecurities.com"
+TOTP_LOGIN_URL = f"{LOGIN_BASE}/login/1.0/tradeApiLogin"
+MPIN_VALIDATE_URL = f"{LOGIN_BASE}/login/1.0/tradeApiValidate"
+NEO_FIN_KEY = "neotradeapi"
 
 
 class KotakNeoSession:
@@ -27,18 +27,18 @@ class KotakNeoSession:
     """
 
     def __init__(
-        self,
-        session_token: str,   # Auth header for all post-login APIs
-        session_sid: str,     # Sid header for all post-login APIs
-        rid: str,
-        base_url: str,        # dynamic — from MPIN validate response
-        expires_at: datetime,
+            self,
+            session_token: str,  # Auth header for all post-login APIs
+            session_sid: str,  # Sid header for all post-login APIs
+            rid: str,
+            base_url: str,  # dynamic — from MPIN validate response
+            expires_at: datetime,
     ):
         self.session_token = session_token
-        self.session_sid   = session_sid
-        self.rid           = rid
-        self.base_url      = base_url.rstrip("/")
-        self.expires_at    = expires_at
+        self.session_sid = session_sid
+        self.rid = rid
+        self.base_url = base_url.rstrip("/")
+        self.expires_at = expires_at
 
     def is_valid(self) -> bool:
         return datetime.now(timezone.utc) < self.expires_at
@@ -46,20 +46,20 @@ class KotakNeoSession:
     def to_dict(self) -> dict:
         return {
             "session_token": self.session_token,
-            "session_sid":   self.session_sid,
-            "rid":           self.rid,
-            "base_url":      self.base_url,
-            "expires_at":    self.expires_at.isoformat(),
+            "session_sid": self.session_sid,
+            "rid": self.rid,
+            "base_url": self.base_url,
+            "expires_at": self.expires_at.isoformat(),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "KotakNeoSession":
         return cls(
-            session_token = data["session_token"],
-            session_sid   = data["session_sid"],
-            rid           = data["rid"],
-            base_url      = data["base_url"],
-            expires_at    = datetime.fromisoformat(data["expires_at"]),
+            session_token=data["session_token"],
+            session_sid=data["session_sid"],
+            rid=data["rid"],
+            base_url=data["base_url"],
+            expires_at=datetime.fromisoformat(data["expires_at"]),
         )
 
 
@@ -81,12 +81,12 @@ class KotakNeoBroker(BaseBroker):
     """
 
     SESSION_TTL_HOURS = 8
-    MAX_RETRIES       = 3
-    RETRY_DELAY_SEC   = 1.0
+    MAX_RETRIES = 3
+    RETRY_DELAY_SEC = 1.0
 
     def __init__(self, user_id: str):
-        self.user_id    = user_id
-        self._session:  Optional[KotakNeoSession] = None
+        self.user_id = user_id
+        self._session: Optional[KotakNeoSession] = None
         self._access_token: str = ""  # from NEO dashboard — used for login + quotes
 
         self._client = httpx.AsyncClient(
@@ -116,11 +116,11 @@ class KotakNeoBroker(BaseBroker):
         return False  # worker will raise — user must complete TOTP + MPIN
 
     async def totp_login(
-        self,
-        mobile_number: str,
-        ucc: str,
-        totp: str,
-        access_token: str,
+            self,
+            mobile_number: str,
+            ucc: str,
+            totp: str,
+            access_token: str,
     ) -> dict:
         """
         Step 1 of auth.
@@ -137,13 +137,13 @@ class KotakNeoBroker(BaseBroker):
             url=TOTP_LOGIN_URL,
             payload={
                 "mobileNumber": mobile_number,
-                "ucc":          ucc,
-                "totp":         totp,
+                "ucc": ucc,
+                "totp": totp,
             },
             headers={
-                "Authorization": access_token,   # plain token — no Bearer
-                "neo-fin-key":   NEO_FIN_KEY,
-                "Content-Type":  "application/json",
+                "Authorization": access_token,  # plain token — no Bearer
+                "neo-fin-key": NEO_FIN_KEY,
+                "Content-Type": "application/json",
             },
         )
 
@@ -161,16 +161,16 @@ class KotakNeoBroker(BaseBroker):
 
         return {
             "view_token": data["token"],
-            "view_sid":   data["sid"],
-            "rid":        data.get("rid", ""),
+            "view_sid": data["sid"],
+            "rid": data.get("rid", ""),
         }
 
     async def mpin_validate(
-        self,
-        mpin: str,
-        view_token: str,
-        view_sid: str,
-        access_token: str,
+            self,
+            mpin: str,
+            view_token: str,
+            view_sid: str,
+            access_token: str,
     ) -> KotakNeoSession:
         """
         Step 2 of auth.
@@ -186,10 +186,10 @@ class KotakNeoBroker(BaseBroker):
             payload={"mpin": mpin},
             headers={
                 "Authorization": access_token,  # plain token — no Bearer
-                "neo-fin-key":   NEO_FIN_KEY,
-                "Content-Type":  "application/json",
-                "sid":           view_sid,
-                "Auth":          view_token,
+                "neo-fin-key": NEO_FIN_KEY,
+                "Content-Type": "application/json",
+                "sid": view_sid,
+                "Auth": view_token,
             },
         )
 
@@ -204,11 +204,11 @@ class KotakNeoBroker(BaseBroker):
             raise KotakAuthError("No baseUrl in MPIN validate response")
 
         session = KotakNeoSession(
-            session_token = data["token"],
-            session_sid   = data["sid"],
-            rid           = data.get("rid", ""),
-            base_url      = base_url,
-            expires_at    = datetime.now(timezone.utc) + timedelta(hours=self.SESSION_TTL_HOURS),
+            session_token=data["token"],
+            session_sid=data["sid"],
+            rid=data.get("rid", ""),
+            base_url=base_url,
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=self.SESSION_TTL_HOURS),
         )
 
         self._session = session
@@ -227,14 +227,14 @@ class KotakNeoBroker(BaseBroker):
     # ────────────────────────────────────────────────────────────────────────
 
     async def place_order(
-        self,
-        symbol: str,        # pTrdSymbol from scrip master e.g. "ITBEES-EQ"
-        side: str,          # "BUY" | "SELL"
-        qty: int,
-        price: float,       # 0.0 = market order
-        order_type: str,    # "MARKET" | "LIMIT" | "SL" | "SL-M"
-        product_type: str,  # "MIS" | "NRML" | "CNC"
-        exchange: str,      # "nse_cm" | "nse_fo" | "bse_cm" etc.
+            self,
+            symbol: str,  # pTrdSymbol from scrip master e.g. "ITBEES-EQ"
+            side: str,  # "BUY" | "SELL"
+            qty: int,
+            price: float,  # 0.0 = market order
+            order_type: str,  # "MARKET" | "LIMIT" | "SL" | "SL-M"
+            product_type: str,  # "MIS" | "NRML" | "CNC"
+            exchange: str,  # "nse_cm" | "nse_fo" | "bse_cm" etc.
     ) -> dict:
         """
         Place order via Kotak Neo API.
@@ -245,19 +245,19 @@ class KotakNeoBroker(BaseBroker):
         self._ensure_session()
 
         j_data = {
-            "am":  "NO",                              # not AMO
-            "dq":  "0",                               # no disclosed qty
-            "es":  exchange,                          # nse_cm / nse_fo etc.
-            "mp":  "0",                               # no market protection
-            "pc":  product_type,                      # MIS / NRML / CNC
-            "pf":  "N",                               # not portfolio order
-            "pr":  str(price) if price > 0 else "0", # price
-            "pt":  self._map_order_type(order_type),  # MKT / L / SL / SL-M
-            "qt":  str(qty),
-            "rt":  "DAY",
-            "tp":  "0",                               # trigger price
-            "ts":  symbol,                            # trading symbol
-            "tt":  "B" if side == "BUY" else "S",
+            "am": "NO",  # not AMO
+            "dq": "0",  # no disclosed qty
+            "es": exchange,  # nse_cm / nse_fo etc.
+            "mp": "0",  # no market protection
+            "pc": product_type,  # MIS / NRML / CNC
+            "pf": "N",  # not portfolio order
+            "pr": str(price) if price > 0 else "0",  # price
+            "pt": self._map_order_type(order_type),  # MKT / L / SL / SL-M
+            "qt": str(qty),
+            "rt": "DAY",
+            "tp": "0",  # trigger price
+            "ts": symbol,  # trading symbol
+            "tt": "B" if side == "BUY" else "S",
         }
 
         log.info(
@@ -292,26 +292,26 @@ class KotakNeoBroker(BaseBroker):
         )
 
         return {
-            "order_id":  order_id,
-            "status":    resp.get("stat", ""),
-            "symbol":    symbol,
-            "side":      side,
-            "qty":       qty,
-            "price":     price,
-            "exchange":  exchange,
-            "raw":       resp,
+            "order_id": order_id,
+            "status": resp.get("stat", ""),
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "price": price,
+            "exchange": exchange,
+            "raw": resp,
         }
 
     async def place_order_with_sl(
-        self,
-        symbol: str,
-        side: str,
-        qty: int,
-        price: float,
-        order_type: str,
-        product_type: str,
-        exchange: str,
-        stop_loss: Optional[float] = None,
+            self,
+            symbol: str,
+            side: str,
+            qty: int,
+            price: float,
+            order_type: str,
+            product_type: str,
+            exchange: str,
+            stop_loss: Optional[float] = None,
     ) -> dict:
         """
         Places main order + separate SL-M order (opposite side).
@@ -331,7 +331,7 @@ class KotakNeoBroker(BaseBroker):
                     symbol=symbol,
                     side=sl_side,
                     qty=qty,
-                    price=0.0,           # SL-M = market when triggered
+                    price=0.0,  # SL-M = market when triggered
                     order_type="SL-M",
                     product_type=product_type,
                     exchange=exchange,
@@ -345,34 +345,34 @@ class KotakNeoBroker(BaseBroker):
         return result
 
     async def modify_order(
-        self,
-        order_no: str,
-        symbol: str,
-        exchange: str,
-        side: str,
-        qty: int,
-        price: float,
-        order_type: str,
-        product_type: str,
-        trigger_price: float = 0.0,
+            self,
+            order_no: str,
+            symbol: str,
+            exchange: str,
+            side: str,
+            qty: int,
+            price: float,
+            order_type: str,
+            product_type: str,
+            trigger_price: float = 0.0,
     ) -> dict:
         """Modify an existing open order."""
         self._ensure_session()
 
         j_data = {
-            "no":  order_no,
-            "ts":  symbol,
-            "es":  exchange,
-            "tt":  "B" if side == "BUY" else "S",
-            "qt":  str(qty),
-            "pr":  str(price),
-            "tp":  str(trigger_price),
-            "pt":  self._map_order_type(order_type),
-            "pc":  product_type,
-            "mp":  "0",
-            "dq":  "0",
-            "vd":  "DAY",
-            "am":  "NO",
+            "no": order_no,
+            "ts": symbol,
+            "es": exchange,
+            "tt": "B" if side == "BUY" else "S",
+            "qt": str(qty),
+            "pr": str(price),
+            "tp": str(trigger_price),
+            "pt": self._map_order_type(order_type),
+            "pc": product_type,
+            "mp": "0",
+            "dq": "0",
+            "vd": "DAY",
+            "am": "NO",
         }
 
         resp = await self._retry(
@@ -412,12 +412,12 @@ class KotakNeoBroker(BaseBroker):
 
         return {
             "order_id": order_id,
-            "status":   latest.get("ordSt", "UNKNOWN"),
-            "symbol":   latest.get("trdSym", ""),
-            "qty":      latest.get("qty", 0),
+            "status": latest.get("ordSt", "UNKNOWN"),
+            "symbol": latest.get("trdSym", ""),
+            "qty": latest.get("qty", 0),
             "avg_price": latest.get("avgPrc", "0"),
-            "side":     "BUY" if latest.get("trnsTp") == "B" else "SELL",
-            "raw":      data,
+            "side": "BUY" if latest.get("trnsTp") == "B" else "SELL",
+            "raw": data,
         }
 
     # ────────────────────────────────────────────────────────────────────────
@@ -447,10 +447,10 @@ class KotakNeoBroker(BaseBroker):
         return resp.get("data", [])
 
     async def get_limits(
-        self,
-        seg: str = "ALL",
-        exch: str = "ALL",
-        prod: str = "ALL",
+            self,
+            seg: str = "ALL",
+            exch: str = "ALL",
+            prod: str = "ALL",
     ) -> dict:
         """Available margin / cash limits."""
         self._ensure_session()
@@ -458,27 +458,27 @@ class KotakNeoBroker(BaseBroker):
         return await self._post_form(endpoint="/quick/user/limits", j_data=j_data)
 
     async def check_margin(
-        self,
-        exchange: str,
-        symbol_token: str,
-        price: float,
-        qty: int,
-        side: str,
-        order_type: str,
-        product_type: str,
+            self,
+            exchange: str,
+            symbol_token: str,
+            price: float,
+            qty: int,
+            side: str,
+            order_type: str,
+            product_type: str,
     ) -> dict:
         """Check required margin before placing order."""
         self._ensure_session()
         j_data = {
             "brkName": "KOTAK",
             "brnchId": "ONLINE",
-            "exSeg":   exchange,
-            "prc":     str(price),
-            "prcTp":   self._map_order_type(order_type),
-            "prod":    product_type,
-            "qty":     str(qty),
-            "tok":     symbol_token,
-            "trnsTp":  "B" if side == "BUY" else "S",
+            "exSeg": exchange,
+            "prc": str(price),
+            "prcTp": self._map_order_type(order_type),
+            "prod": product_type,
+            "qty": str(qty),
+            "tok": symbol_token,
+            "trnsTp": "B" if side == "BUY" else "S",
         }
         return await self._post_form(endpoint="/quick/user/check-margin", j_data=j_data)
 
@@ -507,7 +507,7 @@ class KotakNeoBroker(BaseBroker):
         try:
             from src.db.redis_client import get_redis
             redis = get_redis()
-            key   = f"kotak:session:{self.user_id}"
+            key = f"kotak:session:{self.user_id}"
             await redis.setex(
                 key,
                 int(self.SESSION_TTL_HOURS * 3600),
@@ -521,7 +521,7 @@ class KotakNeoBroker(BaseBroker):
         try:
             from src.db.redis_client import get_redis
             redis = get_redis()
-            raw   = await redis.get(f"kotak:session:{self.user_id}")
+            raw = await redis.get(f"kotak:session:{self.user_id}")
             if raw:
                 return KotakNeoSession.from_dict(json.loads(raw))
         except Exception as e:
@@ -571,7 +571,7 @@ class KotakNeoBroker(BaseBroker):
     async def _get(self, endpoint: str) -> dict:
         """GET request — used for order book, positions, holdings."""
         self._ensure_session()
-        url  = f"{self._session.base_url}{endpoint}"
+        url = f"{self._session.base_url}{endpoint}"
         resp = await self._client.get(url, headers=self._trading_headers())
         return self._handle_response(resp)
 
@@ -580,10 +580,17 @@ class KotakNeoBroker(BaseBroker):
 
         if resp.status_code == 401:
             self._session = None
-            raise KotakAuthError("Session expired — user must re-authenticate")
+            raise KotakAuthError("Session expired — re-authenticate")
+
+        if resp.status_code == 424:
+            # Dependency failure — usually means token expired or already used
+            raise KotakAuthError(
+                "Kotak dependency error (424) — TOTP may have expired. "
+                "Wait 30 seconds and try submitting TOTP again."
+            )
 
         if resp.status_code == 429:
-            raise KotakRateLimitError("Kotak API rate limit — 10 req/sec max")
+            raise KotakRateLimitError("Rate limit — 10 req/sec max")
 
         if resp.status_code >= 500:
             raise KotakAPIError(
@@ -596,7 +603,6 @@ class KotakNeoBroker(BaseBroker):
         except Exception:
             raise KotakAPIError(f"Non-JSON response: {resp.text[:200]}")
 
-        # Kotak returns stat="Not_Ok" even on HTTP 200
         if isinstance(data, dict):
             stat = data.get("stat", "")
             if stat == "Not_Ok":
@@ -638,18 +644,18 @@ class KotakNeoBroker(BaseBroker):
     def _trading_headers(self) -> dict:
         """Headers for all post-login APIs."""
         return {
-            "accept":       "application/json",
-            "Auth":         self._session.session_token,
-            "Sid":          self._session.session_sid,
-            "neo-fin-key":  NEO_FIN_KEY,
+            "accept": "application/json",
+            "Auth": self._session.session_token,
+            "Sid": self._session.session_sid,
+            "neo-fin-key": NEO_FIN_KEY,
         }
 
     def _map_order_type(self, order_type: str) -> str:
         return {
             "MARKET": "MKT",
-            "LIMIT":  "L",
-            "SL":     "SL",
-            "SL-M":   "SL-M",
+            "LIMIT": "L",
+            "SL": "SL",
+            "SL-M": "SL-M",
         }.get(order_type.upper(), "MKT")
 
     def _ensure_session(self) -> None:
@@ -669,8 +675,10 @@ class KotakAPIError(Exception):
         super().__init__(message)
         self.status_code = status_code
 
+
 class KotakAuthError(KotakAPIError):
     pass
+
 
 class KotakRateLimitError(KotakAPIError):
     pass

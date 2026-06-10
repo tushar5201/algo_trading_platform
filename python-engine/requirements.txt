@@ -28,3 +28,5 @@ pandas==2.2.2
 
 # Dev
 watchfiles==0.21.0  # auto-restart on file change
+
+aiohttp

@@ -1,23 +1,23 @@
-import {Request, Response} from "express";
-import {Trade} from "../models/Trade";
+import { Request, Response } from "express";
+import { Trade } from "../models/Trade";
 import mongoose from "mongoose";
-import {AppError} from "../middleware/errorhandler";
+import { AppError } from "../middleware/errorhandler";
 
 export const getMyTrades = async (req: Request, res: Response): Promise<void> => {
-    const {page = '1', limit = '20', status, strategy} = req.query;
+    const { page = '1', limit = '20', status, strategy } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
 
-    const filter: Record<string, unknown> = {userId: new mongoose.Types.ObjectId(req.user!.userId)};
+    const filter: Record<string, unknown> = { userId: new mongoose.Types.ObjectId(req.user!.userId) };
     if (status) filter.status = status;
     if (strategy) filter.strategyName = strategy;
 
     const [trades, total] = await Promise.all([
-        Trade.find(filter).sort({createdAt: -1}).skip(skip).limit(parseInt(limit as string)),
+        Trade.find(filter).sort({ createdAt: -1 }).skip(skip).limit(parseInt(limit as string)),
         Trade.countDocuments(filter)
     ]);
     res.json({
         success: true,
-        data: {trades, total, page: parseInt(page as string), totalPages: Math.ceil(total / parseInt(limit as string))}
+        data: { trades, total, page: parseInt(page as string), totalPages: Math.ceil(total / parseInt(limit as string)) }
     });
 }
 
@@ -26,32 +26,32 @@ export const getMyPnl = async (req: Request, res: Response): Promise<void> => {
     const [summary, byStrategy, byDay] = await Promise.all([
         // Overall summary
         Trade.aggregate([
-            {$match: {userId, status: 'EXECUTED'}},
+            { $match: { userId, status: 'EXECUTED' } },
             {
                 $group: {
                     _id: null,
-                    totalPnl: {$sum: '$pnl'},
-                    totalTrades: {$count: {}},
-                    winTrades: {$sum: {$cond: [{$gt: ['$pnl', 0]}, 1, 0]}},
-                    lossTrades: {$sum: {$cond: [{$gt: ['$pnl', 0]}, 1, 0]}},
-                    avgPnl: {$avg: '$pnl'},
-                    bestTrade: {$max: '$pnl'},
-                    worstTrade: {$min: '$pnl'},
+                    totalPnl: { $sum: '$pnl' },
+                    totalTrades: { $count: {} },
+                    winTrades: { $sum: { $cond: [{ $gt: ['$pnl', 0] }, 1, 0] } },
+                    lossTrades: { $sum: { $cond: [{ $lt: ['$pnl', 0] }, 1, 0] } },
+                    avgPnl: { $avg: '$pnl' },
+                    bestTrade: { $max: '$pnl' },
+                    worstTrade: { $min: '$pnl' },
                 }
             }
         ]),
         // PnL by strategy
         Trade.aggregate([
-            {$match: {userId, status: 'EXECUTED'}},
+            { $match: { userId, status: 'EXECUTED' } },
             {
                 $group: {
                     _id: '$strategyName',
-                    pnl: {$sum: '$pnl'},
-                    trades: {$count: {}},
-                    winTrades: {$sum: {$cond: [{$gt: ['$pnl', 0]}, 1, 0]}},
+                    pnl: { $sum: '$pnl' },
+                    trades: { $count: {} },
+                    winTrades: { $sum: { $cond: [{ $gt: ['$pnl', 0] }, 1, 0] } },
                 }
             },
-            {$sort: {pnl: -1}}
+            { $sort: { pnl: -1 } }
         ]),
         // PnL by day (last 30 days)
         Trade.aggregate([
@@ -59,19 +59,19 @@ export const getMyPnl = async (req: Request, res: Response): Promise<void> => {
                 $match: {
                     userId,
                     status: 'EXECUTED',
-                    createdAt: {$gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)},
+                    createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
                 }
             },
             {
                 $group: {
                     _id: {
-                        $dateToString: {format: '%Y-%m-%d', data: '$createdAt'},
+                        $dateToString: { format: '%Y-%m-%d', date: '$createdAt' },
                     },
-                    pnl: {$sum: '$pnl'},
-                    trades: {$count: {}},
+                    pnl: { $sum: '$pnl' },
+                    trades: { $count: {} },
                 }
             },
-            {$sort: {_id: 1}}
+            { $sort: { _id: 1 } }
         ])
     ]);
 
@@ -88,7 +88,7 @@ export const getMyPnl = async (req: Request, res: Response): Promise<void> => {
             summary: {
                 totalPnl: s.totalPnl,
                 totalTrades: s.totalTrades,
-                winTrades: s.winRate,
+                winTrades: s.winTrades,
                 lossTrades: s.lossTrades,
                 winRate: `${winRate}%`,
                 avgPnl: s.avgPnl,
@@ -103,7 +103,7 @@ export const getMyPnl = async (req: Request, res: Response): Promise<void> => {
 
 // Admin: view all trades
 export const getAllTrades = async (req: Request, res: Response): Promise<void> => {
-    const {page = '1', limit = '20', userId, status, strategy} = req.query;
+    const { page = '1', limit = '20', userId, status, strategy } = req.query;
     const skip = (parseInt(page as string) - 1) * parseInt(limit as string);
 
     const filter: Record<string, unknown> = {};
@@ -116,10 +116,10 @@ export const getAllTrades = async (req: Request, res: Response): Promise<void> =
             .populate('userId', 'name email')
             .skip(skip)
             .limit(parseInt(limit as string))
-            .sort({createdAt: -1}),
+            .sort({ createdAt: -1 }),
         Trade.countDocuments(filter),
     ]);
-    res.json({success: true, data: {trades, total, page: parseInt(page as string)}});
+    res.json({ success: true, data: { trades, total, page: parseInt(page as string) } });
 };
 
 // Signal trade detail
@@ -129,5 +129,5 @@ export const getTradeById = async (req: Request, res: Response): Promise<void> =
         userId: req.user!.userId,
     });
     if (!trade) throw new AppError(404, 'Trade not found');
-    res.json({success: true, data: trade});
+    res.json({ success: true, data: trade });
 };
