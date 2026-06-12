@@ -5,8 +5,10 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import urlencode
+
+from aiobreaker import CircuitBreakerError
+
 from src.broker.base_broker import BaseBroker
-from src.config.settings import settings
 
 log = structlog.get_logger()
 
@@ -132,20 +134,25 @@ class KotakNeoBroker(BaseBroker):
         Returns { view_token, view_sid, rid }
         """
         self._access_token = access_token
-
-        resp = await self._post_json(
-            url=TOTP_LOGIN_URL,
-            payload={
-                "mobileNumber": mobile_number,
-                "ucc": ucc,
-                "totp": totp,
-            },
-            headers={
-                "Authorization": access_token,  # plain token — no Bearer
-                "neo-fin-key": NEO_FIN_KEY,
-                "Content-Type": "application/json",
-            },
-        )
+        try:
+            resp = await self._post_json(
+                url=TOTP_LOGIN_URL,
+                payload={
+                    "mobileNumber": mobile_number,
+                    "ucc": ucc,
+                    "totp": totp,
+                },
+                headers={
+                    "Authorization": access_token,  # plain token — no Bearer
+                    "neo-fin-key": NEO_FIN_KEY,
+                    "Content-Type": "application/json",
+                },
+            )
+        except CircuitBreakerError:
+            raise KotakAPIError(
+                "Kotak auth service is unavailable (circuit open). "
+                "Too many recent failures — wait 2 minutes and try again."
+            )
 
         data = resp.get("data", {})
         if data.get("status") == "error" or resp.get("status") == "error":
@@ -181,17 +188,23 @@ class KotakNeoBroker(BaseBroker):
 
         Returns KotakNeoSession with session_token, session_sid, base_url.
         """
-        resp = await self._post_json(
-            url=MPIN_VALIDATE_URL,
-            payload={"mpin": mpin},
-            headers={
-                "Authorization": access_token,  # plain token — no Bearer
-                "neo-fin-key": NEO_FIN_KEY,
-                "Content-Type": "application/json",
-                "sid": view_sid,
-                "Auth": view_token,
-            },
-        )
+        try:
+            resp = await self._post_json(
+                url=MPIN_VALIDATE_URL,
+                payload={"mpin": mpin},
+                headers={
+                    "Authorization": access_token,  # plain token — no Bearer
+                    "neo-fin-key": NEO_FIN_KEY,
+                    "Content-Type": "application/json",
+                    "sid": view_sid,
+                    "Auth": view_token,
+                },
+            )
+        except CircuitBreakerError:
+            raise KotakAPIError(
+                "Kotak auth service is unavailable (circuit open). "
+                "Too many recent failures — wait 2 minutes and try again."
+            )
 
         data = resp.get("data", {})
         if data.get("status") == "error" or resp.get("status") == "error":
@@ -268,13 +281,18 @@ class KotakNeoBroker(BaseBroker):
             qty=qty,
             exchange=exchange,
         )
-
-        resp = await self._retry(
-            lambda: self._post_form(
-                endpoint="/quick/order/rule/ms/place",
-                j_data=j_data,
+        try:
+            resp = await self._retry(
+                lambda: self._post_form(
+                    endpoint="/quick/order/rule/ms/place",
+                    j_data=j_data,
+                )
             )
-        )
+        except CircuitBreakerError:
+            raise KotakAPIError(
+                "Kotak order placement is unavailable (circuit open). "
+                "Too many recent failures — wait 1 minute and try again."
+            )
 
         # Success: { "nOrdNo": "...", "stat": "Ok", "stCode": 200 }
         order_id = resp.get("nOrdNo", "")
@@ -375,9 +393,14 @@ class KotakNeoBroker(BaseBroker):
             "am": "NO",
         }
 
-        resp = await self._retry(
-            lambda: self._post_form(endpoint="/quick/order/vr/modify", j_data=j_data)
-        )
+        try:
+            resp = await self._retry(
+                lambda: self._post_form(endpoint="/quick/order/vr/modify", j_data=j_data)
+            )
+        except CircuitBreakerError:
+            raise KotakAPIError(
+                "Kotak order modification is unavailable (circuit open)."
+            )
 
         log.info("kotak.order_modified", order_no=order_no, new_order_no=resp.get("nOrdNo"))
         return {"order_id": resp.get("nOrdNo", order_no), "raw": resp}
@@ -492,10 +515,16 @@ class KotakNeoBroker(BaseBroker):
         query_str = ",".join(queries)
         url = f"{self._session.base_url}/script-details/1.0/quotes/neosymbol/{query_str}/all"
 
-        resp = await self._client.get(
-            url,
-            headers={"Authorization": self._access_token},
-        )
+        try:
+            resp = await self._client.get(
+                url,
+                headers={"Authorization": self._access_token},
+            )
+        except CircuitBreakerError:
+            raise KotakAPIError(
+                "Kotak quotes API is unavailable (circuit open). "
+                "Too many recent failures."
+            )
         self._handle_response(resp)
         return resp.json()
 

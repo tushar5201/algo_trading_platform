@@ -1,9 +1,11 @@
 import asyncio
 import json
 import structlog
+from aiobreaker import CircuitBreakerError
 from bson import ObjectId
 from bullmq import Worker, Job
 
+from src.broker.circuit_breaker import is_any_breaker_open
 from src.db.redis_client import get_redis
 from src.broker.kotak_neo import KotakNeoBroker, KotakAuthError
 from src.db.mongo import get_db
@@ -41,9 +43,7 @@ class StrategyWorker:
 
     async def start(self) -> None:
         log.info("worker.started", queues=[STRATEGY_QUEUE, TRADE_QUEUE])
-
         connection = _redis_opts()
-
         self._strategy_worker = Worker(
             STRATEGY_QUEUE,
             self._handle_strategy_job,
@@ -122,7 +122,25 @@ class StrategyWorker:
         for symbol in strategy.symbols():
             snapshots[symbol] = await _fetch_live_snapshot(symbol)
 
-        signal = await strategy.run(snapshots)
+        if is_any_breaker_open():
+            log.warning(
+                "strategy_job.circuit_open_skip",
+                user_id=user_id,
+                strategy=strategy_name,
+                note="Kotak API circuit open-holding strategy until recovery"
+            )
+            return {"status": "hold", "reason": "Kotak circuit open - waiting for recovery"}
+
+        try:
+            signal = await strategy.run(snapshots)
+        except CircuitBreakerError:
+            log.warning(
+                "strategy_job.circuit_tripped",
+                user_id=user_id,
+                strategy=strategy_name,
+                note="Circuit breaker opened mid-execution — Kotak API went down",
+            )
+            return {"status": "hold", "reason": "Kotak circuit tripped during strategy run"}
 
         if not signal.is_actionable():
             log.info("strategy_job.hold", reason=signal.reason, user_id=user_id)

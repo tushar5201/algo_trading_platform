@@ -1,5 +1,7 @@
 import structlog
 from datetime import datetime, timezone
+
+from src.broker.circuit_breaker import is_any_breaker_open, get_all_breaker_states
 from src.db.mongo import get_db
 from src.db.redis_client import get_redis
 
@@ -118,5 +120,28 @@ async def get_health() -> dict:
         }
     except Exception as e:
         health["checks"]["kotak_sessions"] = {"status": "error", "error": str(e)}
+
+    # ── Circuit breakers ──────────────────────────────────────────────────
+    try:
+        breaker_states = get_all_breaker_states()
+        any_open = is_any_breaker_open()
+
+        health["checks"]["circuit_breakers"] = {
+            "status": "degraded" if any_open else "up",
+            "brekers": breaker_states,
+        }
+
+        if any_open:
+            health["status"] = "degraded"
+            open_names = [
+                name for name, info in breaker_states.items()
+                if info["state"] == "open"
+            ]
+            log.error(
+                "health.circuit_breaker_open",
+                open_breakers=open_names,
+            )
+    except Exception as e:
+            health["checks"]["circuit_breakers"] = {"status": "error", "error": str(e)}
 
     return health

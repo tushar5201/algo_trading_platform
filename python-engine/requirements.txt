@@ -2,6 +2,9 @@
 # Queue
 bullmq==2.25.2
 
+# Circuit breaker
+aiobreaker==1.1.0
+
 # Database
 motor==3.4.0    # async mongodb
 pymongo==4.7.1

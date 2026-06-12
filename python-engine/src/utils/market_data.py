@@ -1,9 +1,11 @@
 import httpx
-import json
 import structlog
 from dataclasses import dataclass, field
 from typing import Optional
-from src.config.settings import settings
+
+from aiobreaker import CircuitBreakerError
+
+from src.broker.circuit_breaker import kotak_quotes_breaker
 
 log = structlog.get_logger()
 
@@ -58,7 +60,14 @@ class KotakMarketData:
         query = f"{exchange}|{symbol}"
         url   = self.QUOTES_URL.format(base_url=self.base_url, query=query)
 
-        resp = await self._client.get(url)
+        try:
+            resp = await kotak_quotes_breaker.call_async(self._client.get, url)
+        except CircuitBreakerError:
+            raise RuntimeError(
+                "Kotak quotes circuit is OPEN — too many recent failures. "
+                "Strategy will HOLD until circuit recovers (~60s)."
+            )
+
         resp.raise_for_status()
         raw  = resp.json()
 
@@ -79,7 +88,14 @@ class KotakMarketData:
         query_str = ",".join(queries)
         url       = self.QUOTES_URL.format(base_url=self.base_url, query=query_str)
 
-        resp = await self._client.get(url)
+        try:
+            resp = await kotak_quotes_breaker.call_async(self._client.get, url)
+        except CircuitBreakerError:
+            raise RuntimeError(
+                "Kotak quotes circuit is OPEN — too many recent failures. "
+                "Strategy will HOLD until circuit recovers (~60s)."
+            )
+
         resp.raise_for_status()
         raw  = resp.json()
 

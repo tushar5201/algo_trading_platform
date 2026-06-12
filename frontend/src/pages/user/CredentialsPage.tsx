@@ -3,7 +3,7 @@ import {useQuery, useMutation, useQueryClient} from '@tanstack/react-query';
 import {Key, ShieldCheck, CheckCircle, AlertCircle, ChevronRight} from 'lucide-react';
 import {api} from '../../api/client';
 
-type Step = 'credentials' | 'totp' | 'mpin' | 'done';
+type Step = 'credentials' | 'mpin' | 'done';
 
 export default function CredentialsPage() {
     const [step, setStep] = useState<Step>('credentials');
@@ -17,32 +17,33 @@ export default function CredentialsPage() {
         refetchInterval: 10_000,
     });
 
-    // ── Credentials form ──────────────────────────────────────────────────────
-    const [creds, setCreds] = useState({
+    // ── Combined login form ───────────────────────────────────────────────────
+    const [form, setForm] = useState({
         clientId: '', apiKey: '', apiSecret: '', mobileNumber: '', password: '',
+        accessToken: '', totp: '',
     });
 
-    const saveMutation = useMutation({
-        mutationFn: () => api.post('/user/credentials', creds),
-        onSuccess: () => {
-            setMsg('Credentials saved');
-            setStep('totp');
+    const loginMutation = useMutation({
+        mutationFn: async () => {
+            await api.post('/user/credentials', {
+                clientId: form.clientId,
+                apiKey: form.apiKey,
+                apiSecret: form.apiSecret,
+                mobileNumber: form.mobileNumber,
+                password: form.password,
+            });
+            await api.post('/user/kotak/totp', {
+                accessToken: form.accessToken,
+                mobileNumber: form.mobileNumber,
+                ucc: form.clientId,
+                totp: form.totp,
+            });
         },
-        onError: (e: any) => setErr(e.response?.data?.message ?? 'Failed'),
-    });
-
-    // ── TOTP form ─────────────────────────────────────────────────────────────
-    const [totpForm, setTotpForm] = useState({
-        accessToken: '', mobileNumber: '', ucc: '', totp: '',
-    });
-
-    const totpMutation = useMutation({
-        mutationFn: () => api.post('/user/kotak/totp', totpForm),
         onSuccess: () => {
-            setMsg('TOTP accepted. Now enter your MPIN.');
+            setMsg('Credentials and TOTP accepted. Now enter your MPIN.');
             setStep('mpin');
         },
-        onError: (e: any) => setErr(e.response?.data?.message ?? 'TOTP failed'),
+        onError: (e: any) => setErr(e.response?.data?.message ?? 'Login failed'),
     });
 
     // ── MPIN form ─────────────────────────────────────────────────────────────
@@ -60,9 +61,42 @@ export default function CredentialsPage() {
 
     const clear = () => setErr('');
 
-    // ── UI ────────────────────────────────────────────────────────────────────
+    const renderInputField = (
+        key: string,
+        label: string,
+        type: string,
+        placeholder: string,
+        value: string,
+        onChange: (value: string) => void,
+        maxLength?: number,
+    ) => (
+        <div key={key}>
+            <label className="label">{label}</label>
+            <input
+                type={type}
+                className="input-base"
+                placeholder={placeholder}
+                maxLength={maxLength}
+                value={value}
+                onChange={e => onChange(e.target.value)}
+            />
+        </div>
+    );
 
-    const steps = ['credentials', 'totp', 'mpin', 'done'];
+    const credentialsFields = [
+        {key: 'clientId', label: 'Client ID / UCC', type: 'text', ph: 'AB1234'},
+        {key: 'apiKey', label: 'API access token', type: 'text', ph: 'From NEO dashboard'},
+        {key: 'apiSecret', label: 'API secret (optional)', type: 'password', ph: '••••••'},
+        {key: 'mobileNumber', label: 'Mobile (+91XXXXXXXXXX)', type: 'tel', ph: '+919999999999'},
+        {key: 'password', label: 'Kotak password', type: 'password', ph: '••••••••'},
+    ];
+
+    const totpFields = [
+        {key: 'accessToken', label: 'NEO dashboard access token', type: 'text', ph: 'Your access token'},
+        {key: 'totp', label: 'TOTP (6 digits)', type: 'text', ph: '847291', maxLength: 6},
+    ];
+
+    const steps = ['credentials', 'mpin', 'done'];
     const stepIdx = steps.indexOf(step);
 
     return (
@@ -106,7 +140,7 @@ export default function CredentialsPage() {
                 {sessionData?.hasActiveSession && (
                     <button
                         onClick={() => {
-                            setStep('totp');
+                            setStep('credentials');
                             setMsg('');
                             setErr('');
                         }}
@@ -120,7 +154,7 @@ export default function CredentialsPage() {
 
             {/* Step indicator */}
             <div className="flex items-center gap-2">
-                {['Save credentials', 'Submit TOTP', 'Submit MPIN', 'Done'].map((label, i) => (
+                {['Submit login', 'Submit MPIN', 'Done'].map((label, i) => (
                     <div key={i} className="flex items-center gap-2 flex-1">
                         <div className={`w-6 h-6 rounded-full flex items-center justify-center
                             text-xs font-semibold shrink-0 ${
@@ -135,7 +169,7 @@ export default function CredentialsPage() {
                                 ? 'text-gray-900 dark:text-white font-medium'
                                 : 'text-gray-400 dark:text-gray-500'
                         }`}>{label}</span>
-                        {i < 3 && (
+                        {i < 2 && (
                             <ChevronRight className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0"/>
                         )}
                     </div>
@@ -167,86 +201,38 @@ export default function CredentialsPage() {
             {step === 'credentials' && (
                 <div className="card p-6 space-y-4">
                     <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
-                        Kotak Neo credentials
+                        Kotak Neo login
                     </h2>
-                    {[
-                        {key: 'clientId', label: 'Client ID / UCC', type: 'text', ph: 'AB1234'},
-                        {key: 'apiKey', label: 'API access token', type: 'text', ph: 'From NEO dashboard'},
-                        {key: 'apiSecret', label: 'API secret (optional)', type: 'password', ph: '••••••'},
-                        {key: 'mobileNumber', label: 'Mobile (+91XXXXXXXXXX)', type: 'tel', ph: '+919999999999'},
-                        {key: 'password', label: 'Kotak password', type: 'password', ph: '••••••••'},
-                    ].map(({key, label, type, ph}) => (
-                        <div key={key}>
-                            <label className="label">{label}</label>
-                            <input
-                                type={type}
-                                className="input-base"
-                                placeholder={ph}
-                                value={(creds as any)[key]}
-                                onChange={e => setCreds(c => ({...c, [key]: e.target.value}))}
-                            />
-                        </div>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                        Enter your broker credentials and the TOTP from Google Authenticator to continue.
+                    </p>
+                    {credentialsFields.map(({key, label, type, ph}) => renderInputField(
+                        key,
+                        label,
+                        type,
+                        ph,
+                        (form as any)[key],
+                        value => setForm(f => ({...f, [key]: value})),
+                    ))}
+                    {totpFields.map(({key, label, type, ph, maxLength}) => renderInputField(
+                        key,
+                        label,
+                        type,
+                        ph,
+                        (form as any)[key],
+                        value => setForm(f => ({...f, [key]: value})),
+                        maxLength,
                     ))}
                     <button
                         className="btn-primary w-full"
-                        disabled={saveMutation.isPending}
+                        disabled={loginMutation.isPending}
                         onClick={() => {
                             clear();
-                            saveMutation.mutate();
+                            loginMutation.mutate();
                         }}
                     >
-                        {saveMutation.isPending ? 'Saving…' : 'Save credentials'}
+                        {loginMutation.isPending ? 'Submitting…' : 'Submit credentials & TOTP'}
                     </button>
-                </div>
-            )}
-
-            {/* Step: TOTP */}
-            {step === 'totp' && (
-                <div className="card p-6 space-y-4">
-                    <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
-                        Step 1 — TOTP login
-                    </h2>
-                    <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Open Google Authenticator and enter the 6-digit code for your Kotak account.
-                    </p>
-                    {[
-                        {
-                            key: 'accessToken',
-                            label: 'NEO dashboard access token',
-                            type: 'text',
-                            ph: 'Your access token'
-                        },
-                        {key: 'mobileNumber', label: 'Mobile (+91XXXXXXXXXX)', type: 'tel', ph: '+919999999999'},
-                        {key: 'ucc', label: 'Client code / UCC', type: 'text', ph: 'AB1234'},
-                        {key: 'totp', label: 'TOTP (6 digits)', type: 'text', ph: '847291'},
-                    ].map(({key, label, type, ph}) => (
-                        <div key={key}>
-                            <label className="label">{label}</label>
-                            <input
-                                type={type}
-                                className="input-base"
-                                placeholder={ph}
-                                maxLength={key === 'totp' ? 6 : undefined}
-                                value={(totpForm as any)[key]}
-                                onChange={e => setTotpForm(f => ({...f, [key]: e.target.value}))}
-                            />
-                        </div>
-                    ))}
-                    <div className="flex gap-3">
-                        <button className="btn-secondary" onClick={() => setStep('credentials')}>
-                            Back
-                        </button>
-                        <button
-                            className="btn-primary flex-1"
-                            disabled={totpMutation.isPending}
-                            onClick={() => {
-                                clear();
-                                totpMutation.mutate();
-                            }}
-                        >
-                            {totpMutation.isPending ? 'Submitting…' : 'Submit TOTP'}
-                        </button>
-                    </div>
                 </div>
             )}
 
@@ -271,7 +257,7 @@ export default function CredentialsPage() {
                         />
                     </div>
                     <div className="flex gap-3">
-                        <button className="btn-secondary" onClick={() => setStep('totp')}>Back</button>
+                        <button className="btn-secondary" onClick={() => setStep('credentials')}>Back</button>
                         <button
                             className="btn-primary flex-1"
                             disabled={mpinMutation.isPending || mpin.length !== 6}
