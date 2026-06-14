@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useState, useEffect} from 'react';
 import {useQuery, useMutation, useQueryClient} from '@tanstack/react-query';
 import {Key, ShieldCheck, CheckCircle, AlertCircle, ChevronRight} from 'lucide-react';
 import {api} from '../../api/client';
@@ -9,6 +9,7 @@ export default function CredentialsPage() {
     const [step, setStep] = useState<Step>('credentials');
     const [msg, setMsg] = useState('');
     const [err, setErr] = useState('');
+    const [credentialsStored, setCredentialsStored] = useState(false);
     const qc = useQueryClient();
 
     const {data: sessionData} = useQuery({
@@ -25,13 +26,17 @@ export default function CredentialsPage() {
 
     const loginMutation = useMutation({
         mutationFn: async () => {
-            await api.post('/user/credentials', {
-                clientId: form.clientId,
-                apiKey: form.apiKey,
-                apiSecret: form.apiSecret,
-                mobileNumber: form.mobileNumber,
-                password: form.password,
-            });
+            // If credentials already stored on server, skip re-saving
+            if (!credentialsStored) {
+                await api.post('/user/credentials', {
+                    clientId: form.clientId,
+                    apiKey: form.apiKey,
+                    apiSecret: form.apiSecret,
+                    mobileNumber: form.mobileNumber,
+                    password: form.password,
+                });
+            }
+            // Submit TOTP (always required)
             await api.post('/user/kotak/totp', {
                 accessToken: form.accessToken,
                 mobileNumber: form.mobileNumber,
@@ -45,6 +50,24 @@ export default function CredentialsPage() {
         },
         onError: (e: any) => setErr(e.response?.data?.message ?? 'Login failed'),
     });
+
+    // Fetch stored credentials (if any) and prefill form
+    useEffect(() => {
+        let mounted = true;
+        api.get('/user/credentials')
+            .then(r => r.data.data)
+            .then((data: any) => {
+                if (!mounted) return;
+                if (data) {
+                    setForm(f => ({...f, ...data}));
+                    setCredentialsStored(true);
+                }
+            })
+            .catch(() => {
+                // ignore
+            });
+        return () => { mounted = false; };
+    }, []);
 
     // ── MPIN form ─────────────────────────────────────────────────────────────
     const [mpin, setMpin] = useState('');
@@ -206,14 +229,28 @@ export default function CredentialsPage() {
                     <p className="text-xs text-gray-500 dark:text-gray-400">
                         Enter your broker credentials and the TOTP from Google Authenticator to continue.
                     </p>
-                    {credentialsFields.map(({key, label, type, ph}) => renderInputField(
-                        key,
-                        label,
-                        type,
-                        ph,
-                        (form as any)[key],
-                        value => setForm(f => ({...f, [key]: value})),
-                    ))}
+                    {credentialsStored ? (
+                        <div className="space-y-2">
+                            <p className="text-sm text-gray-700 dark:text-gray-300">
+                                Using stored credentials for <strong>{(form as any).clientId}</strong>
+                            </p>
+                            <p className="text-sm text-gray-500 dark:text-gray-400">
+                                Mobile: {((form as any).mobileNumber ?? '').length ?
+                                `${(form as any).mobileNumber.slice(0,6)}••••${(form as any).mobileNumber.slice(-2)}` : 'N/A'}
+                            </p>
+                            <button className="btn-secondary" onClick={() => setCredentialsStored(false)}>Use different credentials</button>
+                        </div>
+                    ) : (
+                        credentialsFields.map(({key, label, type, ph}) => renderInputField(
+                            key,
+                            label,
+                            type,
+                            ph,
+                            (form as any)[key],
+                            value => setForm(f => ({...f, [key]: value})),
+                        ))
+                    )}
+
                     {totpFields.map(({key, label, type, ph, maxLength}) => renderInputField(
                         key,
                         label,
@@ -223,6 +260,7 @@ export default function CredentialsPage() {
                         value => setForm(f => ({...f, [key]: value})),
                         maxLength,
                     ))}
+
                     <button
                         className="btn-primary w-full"
                         disabled={loginMutation.isPending}
@@ -231,7 +269,7 @@ export default function CredentialsPage() {
                             loginMutation.mutate();
                         }}
                     >
-                        {loginMutation.isPending ? 'Submitting…' : 'Submit credentials & TOTP'}
+                        {loginMutation.isPending ? 'Submitting…' : (credentialsStored ? 'Submit TOTP' : 'Submit credentials & TOTP')}
                     </button>
                 </div>
             )}

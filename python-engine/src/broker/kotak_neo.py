@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from aiobreaker import CircuitBreakerError
 
 from src.broker.base_broker import BaseBroker
+from src.utils.rate_limiter import kotak_limiter
 
 log = structlog.get_logger()
 
@@ -133,9 +134,13 @@ class KotakNeoBroker(BaseBroker):
 
         Returns { view_token, view_sid, rid }
         """
+        from src.broker.circuit_breaker import kotak_auth_breaker
         self._access_token = access_token
+        await kotak_limiter.acquire_auth()
+
         try:
-            resp = await self._post_json(
+            resp = await kotak_auth_breaker.call_async(
+                self._post_json,
                 url=TOTP_LOGIN_URL,
                 payload={
                     "mobileNumber": mobile_number,
@@ -179,6 +184,7 @@ class KotakNeoBroker(BaseBroker):
             view_sid: str,
             access_token: str,
     ) -> KotakNeoSession:
+        from src.broker.circuit_breaker import kotak_auth_breaker
         """
         Step 2 of auth.
         mpin:        user's 6-digit MPIN
@@ -188,8 +194,11 @@ class KotakNeoBroker(BaseBroker):
 
         Returns KotakNeoSession with session_token, session_sid, base_url.
         """
+        await kotak_limiter.acquire_auth()
+
         try:
-            resp = await self._post_json(
+            resp = await kotak_auth_breaker.call_async(
+                self._post_json,
                 url=MPIN_VALIDATE_URL,
                 payload={"mpin": mpin},
                 headers={
@@ -255,6 +264,7 @@ class KotakNeoBroker(BaseBroker):
         CRITICAL: body is x-www-form-urlencoded with a single 'jData' field
         containing a JSON string. NOT a JSON POST body.
         """
+        from src.broker.circuit_breaker import kotak_orders_breaker
         self._ensure_session()
 
         j_data = {
@@ -281,8 +291,10 @@ class KotakNeoBroker(BaseBroker):
             qty=qty,
             exchange=exchange,
         )
+        await kotak_limiter.acquire_orders()
         try:
-            resp = await self._retry(
+            resp = await kotak_orders_breaker.call_async(
+                self._retry,
                 lambda: self._post_form(
                     endpoint="/quick/order/rule/ms/place",
                     j_data=j_data,
@@ -375,6 +387,7 @@ class KotakNeoBroker(BaseBroker):
             trigger_price: float = 0.0,
     ) -> dict:
         """Modify an existing open order."""
+        from src.broker.circuit_breaker import kotak_orders_breaker
         self._ensure_session()
 
         j_data = {
@@ -393,8 +406,11 @@ class KotakNeoBroker(BaseBroker):
             "am": "NO",
         }
 
+        await kotak_limiter.acquire_orders()
+
         try:
-            resp = await self._retry(
+            resp = await kotak_orders_breaker.modify_order(
+                self._retry,
                 lambda: self._post_form(endpoint="/quick/order/vr/modify", j_data=j_data)
             )
         except CircuitBreakerError:
@@ -512,11 +528,14 @@ class KotakNeoBroker(BaseBroker):
 
         Uses access_token (not session_token) — no neo-fin-key, no Auth/Sid.
         """
+        from src.broker.circuit_breaker import kotak_quotes_breaker
+
         query_str = ",".join(queries)
         url = f"{self._session.base_url}/script-details/1.0/quotes/neosymbol/{query_str}/all"
 
         try:
-            resp = await self._client.get(
+            resp = await kotak_quotes_breaker.call_async(
+                self._client.get,
                 url,
                 headers={"Authorization": self._access_token},
             )

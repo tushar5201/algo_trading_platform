@@ -6,6 +6,7 @@ from typing import Optional
 from aiobreaker import CircuitBreakerError
 
 from src.broker.circuit_breaker import kotak_quotes_breaker
+from src.utils.rate_limiter import kotak_limiter
 
 log = structlog.get_logger()
 
@@ -60,6 +61,8 @@ class KotakMarketData:
         query = f"{exchange}|{symbol}"
         url   = self.QUOTES_URL.format(base_url=self.base_url, query=query)
 
+        await kotak_limiter.acquire_quotes()
+
         try:
             resp = await kotak_quotes_breaker.call_async(self._client.get, url)
         except CircuitBreakerError:
@@ -87,6 +90,8 @@ class KotakMarketData:
         """
         query_str = ",".join(queries)
         url       = self.QUOTES_URL.format(base_url=self.base_url, query=query_str)
+
+        await kotak_limiter.acquire_quotes()
 
         try:
             resp = await kotak_quotes_breaker.call_async(self._client.get, url)

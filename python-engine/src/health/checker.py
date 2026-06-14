@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from src.broker.circuit_breaker import is_any_breaker_open, get_all_breaker_states
 from src.db.mongo import get_db
 from src.db.redis_client import get_redis
+from src.utils.rate_limiter import kotak_limiter
 
 log = structlog.get_logger()
 
@@ -120,6 +121,13 @@ async def get_health() -> dict:
         }
     except Exception as e:
         health["checks"]["kotak_sessions"] = {"status": "error", "error": str(e)}
+
+    # ── Outbound rate limiter ──────────────────────────────────────────────────
+    try:
+        rl_status = await kotak_limiter.get_rates()
+        health["checks"]["outbound_rate_limiter"] = rl_status
+    except Exception as e:
+        health["checks"]["outbound_rate_limiter"] = {"status": "error", "error": str(e)}
 
     # ── Circuit breakers ──────────────────────────────────────────────────
     try:

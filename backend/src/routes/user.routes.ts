@@ -8,7 +8,8 @@ import {
     saveCredentials,
     submitMPIN,
     submitTOTP,
-    toggleAutoTrading
+    toggleAutoTrading,
+    getCredentials
 } from "../controllers/user.controller";
 
 const router = Router();
@@ -17,6 +18,7 @@ router.use(authenticate, requireRole('user'));
 router.post('/credentials', asynchandler(saveCredentials));
 router.patch('/toggle-trading', asynchandler(toggleAutoTrading));
 router.get('/strategies', asynchandler(getMyStrategies));
+router.get('/credentials', asynchandler(getCredentials));
 
 router.post('/kotak/totp', asynchandler(submitTOTP));
 router.post('/kotak/mpin', asynchandler(submitMPIN));

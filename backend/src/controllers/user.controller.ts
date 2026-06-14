@@ -228,3 +228,21 @@ export const getKotakSessionStatus = async (req: Request, res: Response): Promis
     });
 };
 
+// ── Return decrypted stored credentials for the authenticated user
+export const getCredentials = async (req: Request, res: Response): Promise<void> => {
+    const user = await User.findById(req.user!.userId);
+    if (!user) throw new AppError(404, 'User not found');
+    if (!user.encryptedCredentials) throw new AppError(404, 'No credentials found');
+
+    let credentials: Record<string, string>;
+    try {
+        credentials = JSON.parse(decrypt(user.encryptedCredentials));
+    } catch (error) {
+        throw new AppError(400, 'Stored credentials are corrupted');
+    }
+
+    // Only return non-sensitive fields required to prefill the form.
+    // We deliberately include all stored fields; frontend will only use what it needs.
+    res.json({ success: true, data: credentials });
+};
+
