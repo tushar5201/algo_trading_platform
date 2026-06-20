@@ -627,8 +627,22 @@ class KotakNeoBroker(BaseBroker):
         log.debug("kotak.response", status=resp.status_code, url=str(resp.url))
 
         if resp.status_code == 401:
-            self._session = None
-            raise KotakAuthError("Session expired — re-authenticate")
+            try:
+                body = resp.json()
+                kotak_msg = (
+                    body.get("emsg") or body.get("message") or body.get("errMsg") or str(body)
+                )
+            except Exception as e:
+                kotak_msg = resp.text[:300]
+            log.warning("kotak.401_received", url=str(resp.url), body=kotak_msg)
+            expiry_markers = ("session", "token", "auth", "expir", "login")
+            looks_like_expiry = any(m in kotak_msg.lower() for m in expiry_markers)
+
+            if looks_like_expiry:
+                self.session = None
+                raise KotakAuthError(f"Session expired — re-authenticate ({kotak_msg})")
+            else:
+                raise KotakAuthError(f"kotak rejected req (401) ({kotak_msg})", 401)
 
         if resp.status_code == 424:
             # Dependency failure — usually means token expired or already used

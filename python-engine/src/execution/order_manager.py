@@ -11,6 +11,8 @@ from src.execution.risk_manager import RiskManager
 from src.execution.signal import Signal, SignalAction
 import structlog
 
+from src.utils.market_data import get_scrip_master
+
 log = structlog.get_logger()
 
 # Order status polling config
@@ -33,7 +35,7 @@ class OrderManager:
         self.risk_manager = RiskManager()
 
     async def execute(
-        self, signal: Signal, user_id: str, broker: BaseBroker, credentials: dict
+            self, signal: Signal, user_id: str, broker: BaseBroker, credentials: dict
     ) -> dict:
         """
         Full trade lifecycle:
@@ -68,6 +70,24 @@ class OrderManager:
                 {"reason": risk.reason, "symbol": signal.symbol},
             )
             return {"success": False, "stage": "risk", "reason": risk.reason}
+
+        broker_symbol = signal.symbol
+        scrip = get_scrip_master()
+        if scrip:
+            resolve = scrip.resolve_trading_symbol(signal.symbol)
+            if resolve:
+                broker_symbol = resolve
+                resolve_pair = scrip.resolve(resolve)
+                if resolve_pair:
+                    _, token = resolve_pair
+                    signal.metadata = {**(signal.metadata or {}), "symbol_token": token}
+            else:
+                log.warning(
+                    "order.symbol_not_resolved",
+                    symbol=signal.symbol,
+                    note="No matching pTrdSymbol found in scrip master;"
+                         "sending symbol as-is, order will likely be rejected."
+                )
 
         # 3. Margin check
         margin_ok = await self._check_margin(broker, signal, credentials)
@@ -227,7 +247,7 @@ class OrderManager:
 
     # Helpers
     async def _check_margin(
-        self, broker: BaseBroker, signal: Signal, credentials: dict
+            self, broker: BaseBroker, signal: Signal, credentials: dict
     ) -> bool:
         """
         Returns True if margin is sufficient. Non-blocking on error.
@@ -265,7 +285,7 @@ class OrderManager:
             return True
 
     async def _poll_order_status(
-        self, broker: BaseBroker, order_id: str, trade_id: str
+            self, broker: BaseBroker, order_id: str, trade_id: str
     ) -> dict:
         """
         Poll kotak order status until filled / rejected / timeout

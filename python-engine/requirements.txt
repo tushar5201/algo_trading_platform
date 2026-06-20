@@ -5,6 +5,9 @@ bullmq==2.25.2
 # Circuit breaker
 aiobreaker==1.1.0
 
+# nse data
+nselib==2.5.1
+
 # Database
 motor==3.4.0    # async mongodb
 pymongo==4.7.1
@@ -33,3 +36,4 @@ pandas==2.2.2
 watchfiles==0.21.0  # auto-restart on file change
 
 aiohttp
+yfinance

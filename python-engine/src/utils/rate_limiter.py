@@ -1,5 +1,5 @@
 import asyncio
-from datetime import time
+import time
 from typing import Optional
 
 import structlog
@@ -71,7 +71,6 @@ class SlidingWindowLimiter:
             wait_for = max(0.01, wait_until - now)
         else:
             wait_for = 0.1
-
         log.debug(
             "rate_limiter.throttled",
             limiter=self.name,
@@ -110,12 +109,12 @@ class KotakRateLimiter:
         )
         self._auth = SlidingWindowLimiter(
             redis=redis,
-            key="rl:kotak:quotes",
+            key="rl:kotak:auth",
             max_calls=5,
             window_sec=60.0,
             name="kotak_auth",
         )
-    log.info("kotak_rate_limiter:initialized", quotes="8/sec", orders="1/sec", auth="5/sec")
+        log.info("kotak_rate_limiter:initialized", quotes="8/sec", orders="1/sec", auth="5/sec")
 
     async def acquire_quotes(self) -> None:
         self._assert_init()
