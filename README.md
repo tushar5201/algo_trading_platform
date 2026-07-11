@@ -71,7 +71,7 @@ A full-stack algorithmic trading platform that connects to a live broker (Kotak 
 
 1. Clone the repo:
    ```bash
-   git clone https://github.com/<your-username>/algo_trading_platform.git
+   git clone https://github.com/tushar5201/algo_trading_platform.git
    cd algo_trading_platform
    ```
 
