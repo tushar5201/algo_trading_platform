@@ -38,7 +38,8 @@ const UserSchema = new Schema<IUser> ({
     },
     passwordHash: {
         type: String,
-        required: true
+        required: true,
+        select: false
     },
     role: {
         type: String,
@@ -56,7 +57,8 @@ const UserSchema = new Schema<IUser> ({
     },
     encryptedCredentials: {
         type: String,
-        default: null
+        default: null,
+        select: false
     },
     autoTrading: {
         type: Boolean,

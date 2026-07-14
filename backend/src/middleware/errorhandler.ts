@@ -25,8 +25,14 @@ export const errorHandler = (err: Error, req: Request, res: Response, next: Next
         return;
     }
 
-    if (err.name === 'MongoError' && (err as any).code === 11000) {
+    if (err.name === 'MongoError' || err.name === 'MongoServerError' && (err as any).code === 11000) {
         res.status(409).json({ message: "Email already exists" });
+        return;
+    }
+
+    const knownStatus = (err as any).statusCode ?? (err as any).status;
+    if (typeof knownStatus === 'number' && knownStatus >= 400 && knownStatus < 500) {
+        res.status(knownStatus).json({ message: err.message || "Bad Request" });
         return;
     }
 

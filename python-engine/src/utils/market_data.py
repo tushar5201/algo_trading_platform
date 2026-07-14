@@ -7,6 +7,7 @@ from aiobreaker import CircuitBreakerError
 
 from src.broker.circuit_breaker import kotak_quotes_breaker
 from src.utils.rate_limiter import kotak_limiter
+from src.utils.retry import retrying_quotes
 
 log = structlog.get_logger()
 
@@ -62,15 +63,21 @@ class KotakMarketData:
         url = self.QUOTES_URL.format(base_url=self.base_url, query=query)
         await kotak_limiter.acquire_quotes()
 
-        try:
+        async def _do_get():
             resp = await kotak_quotes_breaker.call_async(self._client.get, url)
+            resp.raise_for_status()
+            return resp
+
+        try:
+            async for attempt in retrying_quotes():
+                with attempt:
+                    resp = await _do_get()
         except CircuitBreakerError:
             raise RuntimeError(
                 "Kotak quotes circuit is OPEN — too many recent failures. "
                 "Strategy will HOLD until circuit recovers (~60s)."
             )
 
-        resp.raise_for_status()
         raw = resp.json()
 
         # Kotak Neo wraps all responses: {"data": [...], "message": "", "status": 200}
@@ -92,15 +99,21 @@ class KotakMarketData:
 
         await kotak_limiter.acquire_quotes()
 
-        try:
+        async def _do_get():
             resp = await kotak_quotes_breaker.call_async(self._client.get, url)
+            resp.raise_for_status()
+            return resp
+
+        try:
+            async for attempt in retrying_quotes():
+                with attempt:
+                    resp = await _do_get()
         except CircuitBreakerError:
             raise RuntimeError(
                 "Kotak quotes circuit is OPEN — too many recent failures. "
                 "Strategy will HOLD until circuit recovers (~60s)."
             )
 
-        resp.raise_for_status()
         raw = resp.json()
 
         # Unwrap Kotak envelope
@@ -144,16 +157,15 @@ class ScripMaster:
             )
             resp.raise_for_status()
             paths = resp.json()["data"]["filesPaths"]
+            nse_fo_url = next((p for p in paths if "nse_fo" in p), None)
+            nse_cm_url = next((p for p in paths if "nse_cm" in p), None)
+
+            if not nse_fo_url:
+                log.warning("scrip_master.nse_fo_not_found")
+            if not nse_cm_url:
+                log.warning("scrip_master.nse_cm_not_found")
         finally:
             await auth_client.aclose()
-
-        nse_fo_url = next((p for p in paths if "nse_fo" in p), None)
-        nse_cm_url = next((p for p in paths if "nse_cm" in p), None)
-
-        if not nse_fo_url:
-            log.warning("scrip_master.nse_fo_not_found")
-        if not nse_cm_url:
-            log.warning("scrip_master.nse_cm_not_found")
 
         # Step 2: download CSV — public URL, NO auth header (auth causes 400)
         csv_client = httpx.AsyncClient(timeout=httpx.Timeout(60.0))

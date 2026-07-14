@@ -1,13 +1,16 @@
 import dataclasses
+from zoneinfo import ZoneInfo
+
 import structlog
 from datetime import datetime, timezone
 from bson import ObjectId
+
 from src.execution.signal import Signal
 from src.db.mongo import get_db
 
 
 log = structlog.get_logger()
-
+IST = ZoneInfo("Asia/Kolkata")
 
 @dataclasses.dataclass
 class RiskCheckResult:
@@ -28,6 +31,32 @@ class RiskManager:
     PLATFORM_MAX_DAILY_TRADES: int = 50
     PLATFORM_MAX_QTY = 10_000
     PLATFORM_MAX_ORDER_VALUE = 500_000
+
+    def _reference_price(self, signal: Signal) -> float:
+        if signal.price and signal.price > 0:
+            return signal.price
+        meta = signal.metadata or {}
+        for key in ("entry_price", "ltp"):
+            val = meta.get(key)
+            if val:
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    pass
+
+        if signal.stop_loss:
+            estimate = float(signal.stop_loss) / 0.70
+            if estimate > 0:
+                return estimate
+
+        log.warning(
+            "risk.order_value_estimate_missing",
+            symbol = signal.symbol,
+            strategy=signal.strategy_name,
+            note="No price/entry_price/ltp/stop_loss on signal — "
+                 "order value check may not catch an oversized order",
+        )
+        return 1.0
 
     async def check(self, signal: Signal, user_id: str) -> RiskCheckResult:
         """
@@ -53,7 +82,8 @@ class RiskManager:
             )
 
         # 2. order value check
-        order_value = signal.qty * max(signal.price, 1.0)
+        reference_price = self._reference_price(signal)
+        order_value = signal.qty * reference_price
         if order_value > self.PLATFORM_MAX_ORDER_VALUE:
             return RiskCheckResult(
                 passed=False,
@@ -61,9 +91,9 @@ class RiskManager:
             )
 
         # 3. Daily trade count
-        today_start = datetime.now(timezone.utc).replace(
+        today_start = datetime.now(IST).replace(
             hour=0, minute=0, second=0, microsecond=0
-        )
+        ).astimezone(timezone.utc)
         daily_trades = await db.trades.count_documents(
             {
                 "userId": ObjectId(user_id),

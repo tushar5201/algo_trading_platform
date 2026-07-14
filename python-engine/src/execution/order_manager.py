@@ -109,7 +109,7 @@ class OrderManager:
         try:
             if signal.stop_loss and hasattr(broker, "place_order_with_sl"):
                 order_result = await broker.place_order_with_sl(
-                    symbol=signal.symbol,
+                    symbol=broker_symbol,
                     side=signal.action.value,
                     qty=signal.qty,
                     price=signal.price,
@@ -120,7 +120,7 @@ class OrderManager:
                 )
             else:
                 order_result = await broker.place_order(
-                    symbol=signal.symbol,
+                    symbol=broker_symbol,
                     side=signal.action.value,
                     qty=signal.qty,
                     price=signal.price,

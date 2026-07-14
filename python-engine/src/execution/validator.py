@@ -50,7 +50,7 @@ async def validate_signal(signal: Signal, user_id: str) -> None:
     if not user.get("isActive", True):
         raise ValidationError("User account is not active")
     if not user.get("autoTrading", False):
-        raise ValidationError("User account is not active")
+        raise ValidationError("Auto-trading is disabled for this user")
 
     log.info(
         "signal.validated", user_id=user_id, symbol=signal.symbol, action=signal.action

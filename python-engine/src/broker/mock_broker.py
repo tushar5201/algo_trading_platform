@@ -90,7 +90,7 @@ class MockBroker(BaseBroker):
         return {
             "order_id": order_id,
             "status": order.get("status", "complete"),
-            "avg_price": order.get("avg_price", 0),
+            "avg_price": order.get("price", 0),
             "raw": [order],
         }
 

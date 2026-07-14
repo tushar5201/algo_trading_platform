@@ -38,9 +38,10 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/auth", authLimiter);
 app.use("/api/trades", tradeLimiter);
-app.use("/api/kotak", kotakAuthLimiter);
-app.use("/api/users", triggerLimiter);
-app.use("/api/kill-switch", killSwitchLimiter);
+
+app.use("/api/user/kotak", kotakAuthLimiter);
+app.use("/api/admin/users", triggerLimiter);
+app.use("/api/admin/kill-switch", killSwitchLimiter);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/admin", adminRoutes);

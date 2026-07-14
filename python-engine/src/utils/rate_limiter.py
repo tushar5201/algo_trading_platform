@@ -29,7 +29,7 @@ class SlidingWindowLimiter:
                     )
                 return
 
-            if time.monotonic() + wait_for > deadline:
+            if time.time() + wait_for > deadline:
                 raise TimeoutError(
                     f"Rate limiter '{self.name}' timeout: "
                     f"could not acquire slot within {timeout_sec}s. "
@@ -54,14 +54,15 @@ class SlidingWindowLimiter:
 
         pipe = self.redis.pipeline()
         pipe.zremrangebyscore(self.key, 0, window_start)
-        pipe.zadd(self.key, {member: now})
         pipe.zcard(self.key)
-        pipe.expire(self.key, int(self.window_sec) + 1)
         results = await pipe.execute()
 
-        current_count = results[2]
+        current_count = results[1]
 
-        if current_count <= self.max_calls:
+        if current_count < self.max_calls:
+            member = f"{now:.6f}"
+            await self.redis.zadd(self.key, {member: now})
+            await self.redis.expire(self.key, int(self.window_sec) + 1)
             return True, 0.0
 
         oldest_raw = await self.redis.zrange(self.key, 0, 0, withscores=True)

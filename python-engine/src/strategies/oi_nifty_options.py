@@ -117,6 +117,7 @@ class OINiftyOptionsStrategy(BaseStrategy):
                     "atm_strike": atm_strike,
                     "concentration": round(concentration, 3),
                     "ltp": round(ltp, 2),
+                    "entry_price": entry_price,
                 },
             )
 
@@ -152,6 +153,7 @@ class OINiftyOptionsStrategy(BaseStrategy):
                     "atm_strike": atm_strike,
                     "concentration": round(concentration, 3),
                     "ltp": round(ltp, 2),
+                    "entry_price": entry_price,
                 },
             )
 

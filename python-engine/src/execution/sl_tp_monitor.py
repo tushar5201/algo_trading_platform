@@ -239,20 +239,13 @@ class SLTPMonitor:
                     symbol=symbol,
                     user_id=user_id,
                 )
-                return await self._mock_ltp(symbol)
+                return None
 
             exchange, kotak_symbol = _map_symbol(symbol)
 
             # For options symbols like NIFTY26MAY22400CE
             # use the symbol directly as kotak_symbol
-            if symbol not in [
-                "NIFTY",
-                "BANKNIFTY",
-                "SENSEX",
-                "RELIANCE",
-                "TCS",
-                "INFY",
-            ]:
+            if symbol.endswith("CE") or symbol.endswith("PE"):
                 exchange = "nse_fo"
                 kotak_symbol = symbol
 

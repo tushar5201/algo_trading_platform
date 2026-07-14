@@ -1,7 +1,6 @@
 import httpx
 import structlog
 import json
-import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from urllib.parse import urlencode
@@ -10,6 +9,7 @@ from aiobreaker import CircuitBreakerError
 
 from src.broker.base_broker import BaseBroker
 from src.utils.rate_limiter import kotak_limiter
+from src.utils.retry import retrying_orders, retrying_auth
 
 log = structlog.get_logger()
 
@@ -18,7 +18,34 @@ LOGIN_BASE = "https://mis.kotaksecurities.com"
 TOTP_LOGIN_URL = f"{LOGIN_BASE}/login/1.0/tradeApiLogin"
 MPIN_VALIDATE_URL = f"{LOGIN_BASE}/login/1.0/tradeApiValidate"
 NEO_FIN_KEY = "neotradeapi"
+_VALID_SEGMENTS = {"nse_cm", "nse_fo", "bse_cm", "bse_fo", "mcx_fo", "cde_fo"}
+_EXCHANGE_TO_SEGMENT = {
+    "NSE": "nse_cm",
+    "NSE_CM": "nse_cm",
+    "NFO": "nse_fo",
+    "NSE_FO": "nse_fo",
+    "BSE": "bse_cm",
+    "BSE_CM": "bse_cm",
+    "BFO": "bse_fo",
+    "BSE_FO": "bse_fo",
+    "MCX": "mcx_fo",
+    "MCX_FO": "mcx_fo",
+    "CDE": "cde_fo",
+    "CDE_FO": "cde_fo",
+}
 
+def _to_kotak_segment(exchange: str) -> str:
+    """Normalize any exchange spelling used elsewhere in the codebase into
+    the exact lowercase segment code Kotak's API requires."""
+    if not exchange:
+        return exchange
+    if exchange.lower() in _VALID_SEGMENTS:
+        return exchange.lower()
+    mapped = _EXCHANGE_TO_SEGMENT.get(exchange.upper())
+    if mapped:
+        return mapped
+    log.warning("kotak.unknown_exchange_segment", exchange=exchange)
+    return exchange.lower()
 
 class KotakNeoSession:
     """
@@ -138,8 +165,8 @@ class KotakNeoBroker(BaseBroker):
         self._access_token = access_token
         await kotak_limiter.acquire_auth()
 
-        try:
-            resp = await kotak_auth_breaker.call_async(
+        async def _do_totp_call():
+            return await kotak_auth_breaker.call_async(
                 self._post_json,
                 url=TOTP_LOGIN_URL,
                 payload={
@@ -153,6 +180,11 @@ class KotakNeoBroker(BaseBroker):
                     "Content-Type": "application/json",
                 },
             )
+
+        try:
+            async for attempt in retrying_auth():
+                with attempt:
+                    resp = await _do_totp_call()
         except CircuitBreakerError:
             raise KotakAPIError(
                 "Kotak auth service is unavailable (circuit open). "
@@ -195,9 +227,8 @@ class KotakNeoBroker(BaseBroker):
         Returns KotakNeoSession with session_token, session_sid, base_url.
         """
         await kotak_limiter.acquire_auth()
-
-        try:
-            resp = await kotak_auth_breaker.call_async(
+        async def _do_mpin_call():
+            return await kotak_auth_breaker.call_async(
                 self._post_json,
                 url=MPIN_VALIDATE_URL,
                 payload={"mpin": mpin},
@@ -209,6 +240,10 @@ class KotakNeoBroker(BaseBroker):
                     "Auth": view_token,
                 },
             )
+        try:
+            async for attempt in retrying_auth():
+                with attempt:
+                    resp = await _do_mpin_call()
         except CircuitBreakerError:
             raise KotakAPIError(
                 "Kotak auth service is unavailable (circuit open). "
@@ -247,7 +282,6 @@ class KotakNeoBroker(BaseBroker):
     # ────────────────────────────────────────────────────────────────────────
     # Order placement — BaseBroker interface
     # ────────────────────────────────────────────────────────────────────────
-
     async def place_order(
             self,
             symbol: str,  # pTrdSymbol from scrip master e.g. "ITBEES-EQ"
@@ -266,7 +300,7 @@ class KotakNeoBroker(BaseBroker):
         """
         from src.broker.circuit_breaker import kotak_orders_breaker
         self._ensure_session()
-
+        exchange = _to_kotak_segment(exchange)
         j_data = {
             "am": "NO",  # not AMO
             "dq": "0",  # no disclosed qty
@@ -393,7 +427,7 @@ class KotakNeoBroker(BaseBroker):
         j_data = {
             "no": order_no,
             "ts": symbol,
-            "es": exchange,
+            "es": _to_kotak_segment(exchange),
             "tt": "B" if side == "BUY" else "S",
             "qt": str(qty),
             "pr": str(price),
@@ -409,7 +443,7 @@ class KotakNeoBroker(BaseBroker):
         await kotak_limiter.acquire_orders()
 
         try:
-            resp = await kotak_orders_breaker.modify_order(
+            resp = await kotak_orders_breaker.call_async(
                 self._retry,
                 lambda: self._post_form(endpoint="/quick/order/vr/modify", j_data=j_data)
             )
@@ -511,7 +545,7 @@ class KotakNeoBroker(BaseBroker):
         j_data = {
             "brkName": "KOTAK",
             "brnchId": "ONLINE",
-            "exSeg": exchange,
+            "exSeg": _to_kotak_segment(exchange),
             "prc": str(price),
             "prcTp": self._map_order_type(order_type),
             "prod": product_type,
@@ -627,22 +661,9 @@ class KotakNeoBroker(BaseBroker):
         log.debug("kotak.response", status=resp.status_code, url=str(resp.url))
 
         if resp.status_code == 401:
-            try:
-                body = resp.json()
-                kotak_msg = (
-                    body.get("emsg") or body.get("message") or body.get("errMsg") or str(body)
-                )
-            except Exception as e:
-                kotak_msg = resp.text[:300]
-            log.warning("kotak.401_received", url=str(resp.url), body=kotak_msg)
-            expiry_markers = ("session", "token", "auth", "expir", "login")
-            looks_like_expiry = any(m in kotak_msg.lower() for m in expiry_markers)
-
-            if looks_like_expiry:
-                self.session = None
-                raise KotakAuthError(f"Session expired — re-authenticate ({kotak_msg})")
-            else:
-                raise KotakAuthError(f"kotak rejected req (401) ({kotak_msg})", 401)
+            self._session = None
+            log.warning("kotak.401_body", body=resp.text[:500], url=str(resp.url))
+            raise KotakAuthError("Session expired - re-authenticate")
 
         if resp.status_code == 424:
             # Dependency failure — usually means token expired or already used
@@ -669,39 +690,17 @@ class KotakNeoBroker(BaseBroker):
             stat = data.get("stat", "")
             if stat == "Not_Ok":
                 raise KotakAPIError(
-                    data.get("emsg") or data.get("message") or "Kotak API error",
+                    data.get("errMsg") or data.get("emsg") or data.get("message") or "Kotak API error",
                     data.get("stCode", 0),
                 )
 
         return data
 
     async def _retry(self, fn, retries: int = MAX_RETRIES) -> dict:
-        last_err = None
-        for attempt in range(retries):
-            try:
+        async for attempt in retrying_orders():
+            with attempt:
                 return await fn()
-            except KotakAuthError:
-                raise  # never retry auth errors
-            except KotakRateLimitError as e:
-                wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                log.warning("kotak.rate_limit_retry", attempt=attempt, wait=wait)
-                await asyncio.sleep(wait)
-                last_err = e
-            except KotakAPIError as e:
-                if e.status_code and e.status_code >= 500:
-                    wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                    log.warning("kotak.server_error_retry", attempt=attempt, wait=wait)
-                    await asyncio.sleep(wait)
-                    last_err = e
-                else:
-                    raise  # 400/422 = client error, no retry
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                wait = (2 ** attempt) * self.RETRY_DELAY_SEC
-                log.warning("kotak.network_retry", attempt=attempt, wait=wait, error=str(e))
-                await asyncio.sleep(wait)
-                last_err = KotakAPIError(f"Network error: {e}")
-
-        raise last_err or KotakAPIError("Max retries exceeded")
+        raise KotakAPIError("Max retries exceeeded")
 
     def _trading_headers(self) -> dict:
         """Headers for all post-login APIs."""

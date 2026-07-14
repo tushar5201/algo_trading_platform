@@ -91,7 +91,7 @@ export const tradeLimiter = makeLimiter({
     windowMs: 60 * 1000,
     max: 60,
     message: "Too many trade history requests. The dashboard refreshes automatically — no need to refresh manually.",
-    keyFn: (req) => (req as any).user?.id ?? req.ip ?? "unknown"
+    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
 });
 
 export const kotakAuthLimiter = makeLimiter({
@@ -99,7 +99,7 @@ export const kotakAuthLimiter = makeLimiter({
     windowMs: 5 * 60 * 1000,
     max: 3,
     message: "Too many Kotak authentication attempts. Kotak may lock your account after repeated failures. Please wait 5 minutes",
-    keyFn: (req) => (req as any).user?.id ?? req.ip ?? "unknown"
+    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
 });
 
 export const triggerLimiter = makeLimiter({
@@ -107,7 +107,7 @@ export const triggerLimiter = makeLimiter({
     windowMs: 60 * 1000,
     max: 5,
     message: "Too many manual strategy triggers attempts",
-    keyFn: (req) => (req as any).user?.id ?? req.ip ?? "unknown"
+    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
 });
 
 export const killSwitchLimiter = makeLimiter({
