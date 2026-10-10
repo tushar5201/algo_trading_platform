@@ -1,4 +1,4 @@
-import * as axios from "axios";
+import axios from "axios";
 
 export const api = axios.create({
     baseURL: '/api',
@@ -23,9 +23,13 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
     (res) => res,
     (err) => {
-        if(err.response?.status === 401) {
+        const url: string = err.config?.url ?? '';
+        const isLoginAttempt = url.includes('/auth/login') || url.includes('/auth/signup');
+        if(err.response?.status === 401 && !isLoginAttempt) {
             localStorage.removeItem('auth-storage');
-            window.location.href = '/login';
+            if (window.location.pathname !== '/login') {
+                window.location.href = '/login';
+            }
         }
         return Promise.reject(err);
     }

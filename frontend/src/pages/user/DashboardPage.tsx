@@ -39,11 +39,13 @@ function StatCard({
 
 function TradeRow({ trade }: { trade: Trade }) {
     const statusColor = {
-        EXECUTED:  'badge-green',
-        PENDING:   'badge-yellow',
-        FAILED:    'badge-red',
-        CANCELLED: 'badge-red',
-        CLOSED:    'badge-blue',
+        EXECUTED:     'badge-green',
+        PENDING:      'badge-yellow',
+        EXIT_PENDING: 'badge-yellow',
+        FAILED:       'badge-red',
+        CANCELED:     'badge-red',
+        NEEDS_REVIEW: 'badge-red',
+        CLOSED:       'badge-blue',
     }[trade.status] ?? 'badge-yellow';
 
     return (
@@ -67,7 +69,7 @@ function TradeRow({ trade }: { trade: Trade }) {
                 <span className={statusColor}>{trade.status}</span>
             </td>
             <td className="px-4 py-3 text-sm font-medium">
-                {trade.pnl !== null ? (
+                {trade.pnl != null ? (
                     <span className={trade.pnl >= 0
                         ? 'text-emerald-600 dark:text-emerald-400'
                         : 'text-red-600 dark:text-red-400'}>

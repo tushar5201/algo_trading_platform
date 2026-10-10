@@ -1,4 +1,3 @@
-
 # Queue
 bullmq==2.25.2
 
@@ -15,8 +14,8 @@ tenacity==8.5.0
 motor==3.4.0    # async mongodb
 pymongo==4.7.1
 
-# Redis
-#redis==5.3.1
+# Redis (imported directly as redis.asyncio; do not rely on it arriving transitively via bullmq)
+redis == 6.4.0
 
 # Config
 pydantic-settings==2.2.1
@@ -34,9 +33,10 @@ httpx==0.27.0
 # Data (Strategy Logic)
 numpy==1.26.4
 pandas==2.2.2
+yfinance>=0.2.40,<0.3
+
+# Health endpoint
+aiohttp>=3.9,<4
 
 # Dev
 watchfiles==0.21.0  # auto-restart on file change
-
-aiohttp
-yfinance

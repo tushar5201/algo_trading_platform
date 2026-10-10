@@ -3,6 +3,7 @@ import random
 
 import structlog
 
+from src.broker.errors import KotakBusinessError
 from src.broker.base_broker import BaseBroker
 
 log = structlog.get_logger()
@@ -33,7 +34,8 @@ class MockBroker(BaseBroker):
             price: float,
             order_type: str,
             product_type: str,
-            exchange: str
+            exchange: str,
+            trigger_price: float=0.0
     ) -> dict:
         await asyncio.sleep(0.1)
         if not self._authenticated:
@@ -41,48 +43,43 @@ class MockBroker(BaseBroker):
 
             # Only fail if explicitly configured
         if self._fail_rate > 0 and random.random() < self._fail_rate:
-            raise Exception(f"MockBroker: simulated rejection for {symbol}")
+            raise KotakBusinessError(f"MockBroker: simulated rejection for {symbol}")
 
         order_id = f"MOCK-{random.randint(100000, 999999)}"
         if price > 0:
-            slippage = price * random.uniform(-0.005, 0.005)
-            fill_price = round(price + slippage, 2)
+            fill_price = round(price * (1 + random.uniform(-0.005, 0.005)), 2)
         else:
             fill_price = round(random.uniform(50, 500), 2)
+        is_stop = order_type.upper() in ("SL", "SL-M")
         result = {
             "order_id": order_id,
-            "status": "complete",
+            "status": "open" if is_stop else "complete",
             "symbol": symbol,
             "side": side,
             "qty": qty,
             "price": fill_price,
+            "trigger_price": trigger_price,
             "order_type": order_type,
             "product_type": product_type,
-            "exchange": exchange,
+            "exchange": exchange
         }
         self._orders[order_id] = result
         log.info("mock_broker.place_order", order_id=order_id, symbol=symbol, side=side, qty=qty, price=fill_price)
         return result
 
-    async def place_order_with_sl(
+    async def place_sl_order(
             self,
-            symbol: str,
-            side: str,
-            qty: int,
-            price: float,
-            order_type: str,
-            product_type: str,
-            exchange: str,
-            stop_loss: float = None,
-    ) -> dict:
-        result = await self.place_order(
-            symbol, side, qty, price, order_type, product_type, exchange
+            symbol,
+            position_side,
+            qty,
+            trigger_price,
+            product_type,
+            exchange,
+        ) -> dict:
+        sl_side = "SELL" if position_side == "BUY" else "BUY"
+        return await self.place_order(
+            symbol, sl_side, qty, 0.0, "SL-M", product_type, exchange, trigger_price
         )
-        if stop_loss:
-            sl_order_id = f"MOCK-SL-{random.randint(100000, 999999)}"
-            result["sl_order_id"] = sl_order_id
-            log.info("mock_broker.sl_placed", sl_order_id=sl_order_id, stop_loss=stop_loss)
-        return result
 
     async def get_order_status(self, order_id: str) -> dict:
         await asyncio.sleep(0.05)
@@ -90,7 +87,8 @@ class MockBroker(BaseBroker):
         return {
             "order_id": order_id,
             "status": order.get("status", "complete"),
-            "avg_price": order.get("price", 0),
+            "avg_price": order.get("price", 0) if order.get("status", "complete") == "complete" else 0,
+            "rejection_reason": "",
             "raw": [order],
         }
 

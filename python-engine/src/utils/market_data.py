@@ -1,16 +1,22 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import asyncio
 import httpx
 import structlog
 from dataclasses import dataclass, field
 from typing import Optional
+import re as _re
 
 from aiobreaker import CircuitBreakerError
+import contextvars
 
+from src.broker.errors import KotakAuthError, KotakBusinessError
 from src.broker.circuit_breaker import kotak_quotes_breaker
 from src.utils.rate_limiter import kotak_limiter
 from src.utils.retry import retrying_quotes
 
 log = structlog.get_logger()
-
+IST = ZoneInfo("Asia/Kolkata")
 
 @dataclass
 class OptionChainEntry:
@@ -21,7 +27,7 @@ class OptionChainEntry:
     put_ltp: float
     call_iv: float
     put_iv: float
-
+    expiry_tag: str = ""
 
 @dataclass
 class MarketSnapshot:
@@ -53,6 +59,28 @@ class KotakMarketData:
             headers={"Authorization": access_token},
         )
 
+    async def _get(self, url: str) -> httpx.Response:
+        await kotak_limiter.acquire_quotes()
+        async def _once() -> httpx.Response:
+            resp = await self._client.get(url)
+            if resp.status_code in (401, 403):
+                raise KotakAuthError("Quotes API rejected the session (401/403)", resp.status_code)
+            if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                raise KotakBusinessError(f"Quotes API error ({resp.status_code})", resp.status_code)
+            resp.raise_for_status()
+            return resp
+
+        try:
+            async for attempt in retrying_quotes():
+                with attempt:
+                    return await kotak_quotes_breaker.call_async(_once)
+        except CircuitBreakerError:
+            raise RuntimeError(
+                "Kotak quotes circuit is OPEN - too many recent failures"
+                "Strategy will HOLD until circuit recovers (~60s)."
+            )
+        raise RuntimeError("unreachable")
+
     async def get_quote(self, exchange: str, symbol: str) -> dict:
         """
         Fetch live quote for one symbol.
@@ -63,31 +91,16 @@ class KotakMarketData:
         url = self.QUOTES_URL.format(base_url=self.base_url, query=query)
         await kotak_limiter.acquire_quotes()
 
-        async def _do_get():
-            resp = await kotak_quotes_breaker.call_async(self._client.get, url)
-            resp.raise_for_status()
-            return resp
-
-        try:
-            async for attempt in retrying_quotes():
-                with attempt:
-                    resp = await _do_get()
-        except CircuitBreakerError:
-            raise RuntimeError(
-                "Kotak quotes circuit is OPEN — too many recent failures. "
-                "Strategy will HOLD until circuit recovers (~60s)."
-            )
-
+        resp = await self._get(url)
         raw = resp.json()
 
-        # Kotak Neo wraps all responses: {"data": [...], "message": "", "status": 200}
         data = raw.get("data", raw) if isinstance(raw, dict) else raw
 
         if isinstance(data, list) and data:
             return data[0]
         if isinstance(data, dict):
             return data
-        raise Exception(f"No quote data for {exchange}|{symbol}: {raw}")
+        raise Exception(f"No quote data for {exchange}|{symbol}:{raw}")
 
     async def get_multiple_quotes(self, queries: list[str]) -> list[dict]:
         """
@@ -97,23 +110,7 @@ class KotakMarketData:
         query_str = ",".join(queries)
         url = self.QUOTES_URL.format(base_url=self.base_url, query=query_str)
 
-        await kotak_limiter.acquire_quotes()
-
-        async def _do_get():
-            resp = await kotak_quotes_breaker.call_async(self._client.get, url)
-            resp.raise_for_status()
-            return resp
-
-        try:
-            async for attempt in retrying_quotes():
-                with attempt:
-                    resp = await _do_get()
-        except CircuitBreakerError:
-            raise RuntimeError(
-                "Kotak quotes circuit is OPEN — too many recent failures. "
-                "Strategy will HOLD until circuit recovers (~60s)."
-            )
-
+        resp = await self._get(url)
         raw = resp.json()
 
         # Unwrap Kotak envelope
@@ -142,9 +139,19 @@ class ScripMaster:
         self._cache: dict[str, dict] = {}  # trading_symbol → {token, lot_size, ...}
         self._cm_cache: dict[str, dict] = {}  # trading_symbol → {token, lot_size, ...}
         self._loaded = False
+        self.loaded_on: Optional[str] = None
+        self._lock = asyncio.Lock()
+
+    async def ensure_fresh(self) -> None:
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        if self._loaded and self.loaded_on == today:
+            return
+        async with self._lock:
+            if self._loaded and self.loaded_on == today:
+                return
+            await self.load()
 
     async def load(self) -> None:
-        import csv, io
 
         auth_client = httpx.AsyncClient(
             timeout=httpx.Timeout(30.0),
@@ -178,6 +185,8 @@ class ScripMaster:
             await csv_client.aclose()
 
         self._loaded = bool(self._cache or self._cm_cache)
+        if self._loaded:
+            self.loaded_on = datetime.now(IST).strftime("%Y-%m-%d")
         log.info("scrip_master.loaded", fo_count=len(self._cache), cm_count=len(self._cm_cache))
 
     @staticmethod
@@ -206,8 +215,9 @@ class ScripMaster:
         """Return numeric pSymbol token for a trading symbol, or None."""
         return self._cache.get(trading_symbol, {}).get("token") or None
 
-    def get_lot_size(self, trading_symbol: str) -> int:
-        return self._cache.get(trading_symbol, {}).get("lot_size", 75)
+    def get_lot_size(self, trading_symbol: str) -> Optional[int]:
+        entry = self._cache.get(trading_symbol)
+        return entry.get("lot_size") if entry else None
 
     def get_equity_token(self, trading_symbol: str) -> Optional[str]:
         return self._cm_cache.get(trading_symbol, {}).get("token") or None
@@ -238,10 +248,19 @@ class ScripMaster:
 # ── Global singletons ─────────────────────────────────────────────────────────
 
 _market_data: Optional[KotakMarketData] = None
+_md_by_user: dict[str, KotakMarketData] = {}
 _scrip_master: Optional[ScripMaster] = None
+_current_user: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("md_user", default=None)
 
+def _close_later(client: Optional[KotakMarketData]) -> None:
+    if client is None:
+        return
+    try:
+        asyncio.get_event_loop().create_task(client.close())
+    except RuntimeError:
+        pass
 
-def init_market_data(access_token: str, base_url: str) -> None:
+def init_market_data(access_token: str, base_url: str, user_id: Optional[str]=None) -> None:
     global _market_data, _scrip_master
     if not base_url or not access_token:
         log.error(
@@ -251,24 +270,53 @@ def init_market_data(access_token: str, base_url: str) -> None:
             has_token=bool(access_token),
         )
         return
-    _market_data = KotakMarketData(access_token, base_url)
-    _scrip_master = ScripMaster(access_token, base_url)
-    log.info("market_data.initialized", base_url=base_url[:50])
 
+    client = KotakMarketData(access_token, base_url)
+    if user_id:
+        old = _md_by_user.get(user_id)
+        _md_by_user[user_id] = client
+        _close_later(old)
+    else:
+        _close_later(_market_data)
+    _market_data = client
+    if _scrip_master is None:
+        _scrip_master = ScripMaster(access_token, base_url)
+    else:
+        _scrip_master.access_token = access_token
+        _scrip_master.base_url = base_url.rstrip("/")
+    log.info("market_data.initialized", user_id=user_id, base_url=base_url[:50])
+
+def has_market_data(user_id: str) -> bool:
+    return user_id in _md_by_user
+
+def bind_market_data_user(user_id: Optional[str]) -> None:
+    _current_user.set(user_id)
 
 def get_market_data() -> Optional[KotakMarketData]:
+    uid = _current_user.get()
+    if uid and uid in _md_by_user:
+        return _md_by_user[uid]
     return _market_data
-
 
 def get_scrip_master() -> Optional[ScripMaster]:
     return _scrip_master
 
+async def close_market_data() -> None:
+    clients = list(_md_by_user.values())
+    if _market_data is not None and _market_data not in clients:
+        clients.append(_market_data)
+    for c in clients:
+        try:
+            await c.close()
+        except Exception:
+            pass
+    _md_by_user.clear()
 
 # ── Snapshot fetcher ──────────────────────────────────────────────────────────
 
 async def _fetch_live_snapshot(symbol: str) -> MarketSnapshot:
     """Fetch real OHLC snapshot from Kotak Quotes API."""
-    md = _market_data
+    md = get_market_data()
     if md is None:
         raise RuntimeError(
             "Market data client not initialised — complete Kotak login first"
@@ -307,10 +355,7 @@ async def _fetch_live_option_chain(
     cache to build "nse_fo|{token}" queries.  If the scrip master hasn't loaded
     yet we return [] immediately — the strategy HOLDs and retries next minute.
     """
-    import re as _re
-    from datetime import datetime
-
-    md = _market_data
+    md = get_market_data()
     scrip = _scrip_master
 
     if md is None:
@@ -328,10 +373,6 @@ async def _fetch_live_option_chain(
     atm = round(ltp / strike_gap) * strike_gap
     strikes = [atm + (i * strike_gap) for i in range(-atm_range, atm_range + 1)]
 
-    now = datetime.now()
-    month = now.strftime("%b").upper()  # JUN
-    year = now.strftime("%y")  # 26
-
     # ── 2. Build queries using pSymbol tokens from scrip master ───────────────
     # Kotak neosymbol API requires pSymbol (numeric token), NOT trading symbol.
     # "nse_fo|NIFTY26JUN24500CE" → returns nothing
@@ -342,26 +383,31 @@ async def _fetch_live_option_chain(
             note="Scrip master loads ~10s after startup. Will retry next tick.",
         )
         return []
+    await scrip.ensure_fresh()
 
+    # Use IST (the container clock is UTC) and fall back to NEXT month when the current
+    # month's contract has expired / been removed from the scrip master.
+    expiry_tag = ""
     token_to_symbol: dict[str, str] = {}  # pSymbol token → trading symbol
     queries: list[str] = []
-
-    for strike in strikes:
-        for opt_type in ("CE", "PE"):
-            trading_sym = f"NIFTY{year}{month}{int(strike)}{opt_type}"
-            token = scrip.get_token(trading_sym)
-            if token:
-                queries.append(f"nse_fo|{token}")
-                token_to_symbol[token] = trading_sym
-            else:
-                log.debug("option_chain.token_not_found", symbol=trading_sym)
+    for tag in _candidate_expiry_tags(datetime.now(IST)):
+        token_to_symbol, queries = {}, []
+        for strike in strikes:
+            for opt_type in ("CE", "PE"):
+                trading_sym = f"NIFTY{tag}{int(strike)}{opt_type}"
+                token = scrip.get_token(trading_sym)
+                if token:
+                    queries.append(f"nse_fo|{token}")
+                    token_to_symbol[token] = trading_sym
+        if queries:
+            expiry_tag = tag
+            break
 
     if not queries:
         log.warning(
             "option_chain.no_tokens_found",
-            month=month, year=year, atm=atm,
-            note="Check scrip master has current expiry. "
-                 "Monthly expiry changes last Thursday of month.",
+            atm=atm,
+            note="No NIFTY contracts found for this or next month in the scrip master.",
         )
         return []
 
@@ -416,14 +462,17 @@ async def _fetch_live_option_chain(
                 "call_iv": 0.0, "put_iv": 0.0,
             }
 
-        # OI: Kotak returns "oi" for F&O contracts
-        oi_raw = q.get("oi", 0) or q.get("open_interest", 0) or q.get("open_int", "") or 0
-        if not oi_raw:
-            oi_raw = (
-                    float(q.get("total_buy_quantity", 0) or 0) +
-                    float(q.get("total_sell_quantity", 0) or 0)
-            )
-        oi_val = int(float(oi_raw)) or 100_000
+        # OI: Kotak returns "oi" for F&O contracts. If it is missing we SKIP the contract.
+        # (It used to be replaced by buy+sell quantity, or a made-up 100,000, and the PCR
+        # that real orders were based on was computed from those invented numbers.)
+        oi_raw = q.get("oi") or q.get("open_interest") or q.get("open_int")
+        try:
+            oi_val = int(float(oi_raw)) if oi_raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            oi_val = 0
+        if oi_val <= 0:
+            log.debug("option_chain.oi_missing", symbol=sym)
+            continue
         iv_raw = (
                 q.get("iv") or q.get("impliedVolatility")
                 or q.get("implied_volatility") or q.get("ivPercent") or 0
@@ -442,8 +491,14 @@ async def _fetch_live_option_chain(
             chain[strike_val]["put_oi"] = oi_val
             chain[strike_val]["put_iv"] = iv_val
 
-    log.info("option_chain.parsed",
-             strikes_found=len(chain), atm=atm)
+    # Only strikes with BOTH sides present are usable: a one-sided strike skews the PCR.
+    complete = {k: v for k, v in chain.items() if v["call_oi"] > 0 and v["put_oi"] > 0}
+    log.info("option_chain.parsed", strikes_found=len(chain), complete=len(complete), atm=atm, expiry=expiry_tag)
+
+    min_strikes = max(3, atm_range)
+    if len(complete) < min_strikes:
+        log.warning("option_chain.insufficient_data", complete=len(complete), required=min_strikes)
+        return []
 
     return [
         OptionChainEntry(
@@ -454,13 +509,34 @@ async def _fetch_live_option_chain(
             put_ltp=data["put_ltp"],
             call_iv=data.get("call_iv", 0.0),
             put_iv=data.get("put_iv", 0.0),
+            expiry_tag=expiry_tag,
         )
-        for strike, data in sorted(chain.items())
+        for strike, data in sorted(complete.items())
     ]
 
 
+def _candidate_expiry_tags(now: datetime) -> list[str]:
+    """['26SEP', '26OCT'] - current month first, then next month (year rolls over in December)."""
+    tags = []
+    for offset in (0, 1):
+        month_index = now.month - 1 + offset
+        year = now.year + month_index // 12
+        month = month_index % 12 + 1
+        tags.append(datetime(year, month, 1).strftime("%y%b").upper())
+    return tags
+
+
+async def fetch_ltp(exchange_segment: str, token: str) -> Optional[float]:
+    """LTP for an already-resolved (segment, token). Returns None if unavailable."""
+    md = get_market_data()
+    if md is None or not token:
+        return None
+    quote = await md.get_quote(exchange_segment, token)
+    ltp = float(quote.get("ltp", 0) or 0)
+    return ltp if ltp > 0 else None
+
 def _map_symbol(symbol: str) -> tuple[str, str]:
-    """Map strategy symbol → (exchange, kotak_symbol) for quotes API."""
+    """Map strategy symbol → (exchange, kotak_token) for the quotes API."""
     index_mapping = {
         "NIFTY": ("nse_cm", "Nifty 50"),
         "BANKNIFTY": ("nse_cm", "Nifty Bank"),
@@ -471,9 +547,17 @@ def _map_symbol(symbol: str) -> tuple[str, str]:
 
     scrip = _scrip_master
     if scrip and scrip._loaded:
-        token = scrip.get_equity_token(symbol)
-        if token:
-            return "nse_cm", token
+        # F&O trading symbol (e.g. NIFTY26SEP24500CE): the quotes API needs the numeric token
+        if symbol.endswith(("CE", "PE")):
+            token = scrip.get_token(symbol)
+            if token:
+                return "nse_fo", token
+        # equities are keyed as e.g. "RELIANCE-EQ" in the cash-market master
+        trading_symbol = scrip.resolve_trading_symbol(symbol)
+        if trading_symbol:
+            token = scrip.get_equity_token(trading_symbol)
+            if token:
+                return "nse_cm", token
         log.warning(
             "market_data.symbol_not_in_scrip_master",
             symbol=symbol,

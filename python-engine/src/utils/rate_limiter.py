@@ -1,11 +1,28 @@
 import asyncio
 import time
 from typing import Optional
-
+import uuid
 import structlog
 
 log = structlog.get_logger()
 
+_ACQUIRE_LUA = """
+local key    = KEYS[1]
+local now    = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local max    = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if count < max then
+    redis.call('ZADD', key, now, member)
+    redis.call('EXPIRE', key, math.ceil(window) + 1)
+    return {1, '0'}
+end
+local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+local wait = tonumber(oldest[2]) + window - now
+return {0, tostring(wait)}
+"""
 
 class SlidingWindowLimiter:
     def __init__(self, redis, key: str, max_calls: int, window_sec: float, name: str = ""):
@@ -49,42 +66,19 @@ class SlidingWindowLimiter:
 
     async def _check_and_record(self) -> tuple[bool, float]:
         now = time.time()
-        window_start = now - self.window_sec
-        member = f"{now:.6f}"
-
-        pipe = self.redis.pipeline()
-        pipe.zremrangebyscore(self.key, 0, window_start)
-        pipe.zcard(self.key)
-        results = await pipe.execute()
-
-        current_count = results[1]
-
-        if current_count < self.max_calls:
-            member = f"{now:.6f}"
-            await self.redis.zadd(self.key, {member: now})
-            await self.redis.expire(self.key, int(self.window_sec) + 1)
-            return True, 0.0
-
-        oldest_raw = await self.redis.zrange(self.key, 0, 0, withscores=True)
-        if oldest_raw:
-            oldest_ts = oldest_raw[0][1]
-            wait_until = oldest_ts + self.window_sec
-            wait_for = max(0.01, wait_until - now)
-        else:
-            wait_for = 0.1
-        log.debug(
-            "rate_limiter.throttled",
-            limiter=self.name,
-            current=current_count,
-            max=self.max_calls,
-            wait_ms=round(wait_for * 1000),
+        member = f"{now:.6f}-{uuid.uuid4().hex[:8]}"
+        allowed, wait_raw = await self.redis.eval(
+            _ACQUIRE_LUA, 1, self.key, now, self.window_sec, self.max_calls, member
         )
+        if int(allowed) == 1:
+            return True, 0.0
+        wait_for = max(0.01, float(wait_raw))
+        log.debug("rate-limiter.throttled", limiter=self.name, max=self.max_calls, wait_ms=round(wait_for * 1000))
         return False, wait_for
 
     async def get_current_rate(self) -> int:
         now = time.time()
-        window_start = now - self.window_sec
-        await self.redis.zremrangebyscore(self.key, 0, window_start)
+        await self.redis.zremrangebyscore(self.key, 0, now - self.window_sec)
         return await self.redis.zcard(self.key)
 
 class KotakRateLimiter:
@@ -94,57 +88,42 @@ class KotakRateLimiter:
         self._auth: Optional[SlidingWindowLimiter] = None
 
     def init(self, redis) -> None:
-        self._quotes = SlidingWindowLimiter(
-            redis=redis,
-            key="rl:kotak:quotes",
-            max_calls=8,
-            window_sec=1.0,
-            name="kotak_quotes",
-        )
-        self._orders = SlidingWindowLimiter(
-            redis=redis,
-            key="rl:kotak:orders",
-            max_calls=1,
-            window_sec=1.0,
-            name="kotak_orders",
-        )
-        self._auth = SlidingWindowLimiter(
-            redis=redis,
-            key="rl:kotak:auth",
-            max_calls=5,
-            window_sec=60.0,
-            name="kotak_auth",
-        )
-        log.info("kotak_rate_limiter:initialized", quotes="8/sec", orders="1/sec", auth="5/sec")
+        self._quotes = SlidingWindowLimiter(redis, "rl:kotak:quotes", 8, 1.0, "kotak_quotes")
+        self._orders = SlidingWindowLimiter(redis, "rl:kotak:orders", 1, 1.0, "kotak_orders")
+        self._auth = SlidingWindowLimiter(redis, "rl:kotak:auth", 5, 60.0, "kotak_auth")
+        log.info("kotak_rate_limiter.initialized", quotes="8/sec", orders="1/sec", auth="5/min")
 
     async def acquire_quotes(self) -> None:
         self._assert_init()
         await self._quotes.acquire(timeout_sec=5.0)
+
     async def acquire_orders(self) -> None:
         self._assert_init()
         await self._orders.acquire(timeout_sec=10.0)
+
     async def acquire_auth(self) -> None:
         self._assert_init()
         await self._auth.acquire(timeout_sec=10.0)
 
     async def get_rates(self) -> dict:
-        if not self._quotes:
+        if not (self._quotes and self._orders and self._auth and self._auth):
             return {"status": "not_initialized"}
         return {
             "status": "active",
             "quotes": await self._quotes.get_current_rate(),
             "orders": await self._orders.get_current_rate(),
             "limits": {
-                "quotes": f"{self._quotes.max_calls}/sec",
-                "orders": f"{self._orders.max_calls}/sec",
-                "auth": f"{self._auth.max_calls}/sec",
+                "quotes": f"{self._quotes.max_calls}/{self._quotes.window_sec:g}s",
+                "orders": f"{self._orders.max_calls}/{self._orders.window_sec:g}s",
+                "auth": f"{self._auth.max_calls}/{self._auth.window_sec:g}s",
             }
         }
 
     def _assert_init(self) -> None:
-        if not self._quotes:
+        if not (self._quotes and self._orders and self._auth):
             raise RuntimeError(
                 "KotakRateLimiter was not initialized properly. call .init(redis) first"
             )
+
 
 kotak_limiter = KotakRateLimiter()

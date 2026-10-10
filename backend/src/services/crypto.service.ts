@@ -2,8 +2,9 @@ import { env } from "../config/env";
 import crypto from "crypto";
 
 const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 16;
+const IV_LENGTH = 12;
 const KEY = Buffer.from(env.AES_SECRET_KEY, 'utf-8');
+if(KEY.length !== 32) throw new Error("AES_SECRET_KEY length must be at least 32");
 
 export interface EncryptedPayload {
     iv: string;

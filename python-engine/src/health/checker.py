@@ -9,6 +9,16 @@ from src.utils.rate_limiter import kotak_limiter
 log = structlog.get_logger()
 
 
+async def _queue_counts(redis, name: str) -> dict:
+    prefix = f"bull:{name}"
+    return {
+        "waiting": await redis.llen(f"{prefix}:wait"),
+        "active": await redis.llen(f"{prefix}:active"),
+        "delayed": await redis.zcard(f"{prefix}:delayed"),
+        "failed": await redis.zcard(f"{prefix}:failed"),
+    }
+
+
 async def get_health() -> dict:
     """
     Returns health status of all dependencies.
@@ -27,7 +37,7 @@ async def get_health() -> dict:
         health["checks"]["mongodb"] = {"status": "up"}
     except Exception as e:
         health["checks"]["mongodb"] = {"status": "down", "error": str(e)}
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"
         log.error("health.mongodb_down", error=str(e))
 
     # ── Redis ─────────────────────────────────────────────────────────────
@@ -37,56 +47,17 @@ async def get_health() -> dict:
         health["checks"]["redis"] = {"status": "up"}
     except Exception as e:
         health["checks"]["redis"] = {"status": "down", "error": str(e)}
-        health["status"] = "degraded"
+        health["status"] = "unhealthy"
         log.error("health.redis_down", error=str(e))
 
     # ── Queue depths ──────────────────────────────────────────────────────
     try:
         redis = get_redis()
-
-        strategy_waiting = await redis.llen("bull:strategy-runner:wait")
-        strategy_active = await redis.llen("bull:strategy-runner:active")
-        strategy_failed = await redis.llen("bull:strategy-runner:failed")
-        trade_waiting = await redis.llen("bull:trade-executor:wait")
-        trade_active = await redis.llen("bull:trade-executor:active")
-        trade_failed = await redis.llen("bull:trade-executor:failed")
-
-        # Dead letter count from MongoDB
-        try:
-            db = await get_db()
-            dlq_count = await db.dead_letter_jobs.count_documents({"status": "DEAD"})
-        except Exception:
-            dlq_count = -1
-
-        queue_health = {
-            "status": "up",
-            "strategy_runner": {
-                "waiting": strategy_waiting,
-                "active": strategy_active,
-                "failed": strategy_failed,
-            },
-            "trade_executor": {
-                "waiting": trade_waiting,
-                "active": trade_active,
-                "failed": trade_failed,
-            },
-            "dead_letter": dlq_count,
-        }
-
-        # Warn if DLQ is growing
-        if dlq_count > 10:
-            queue_health["warning"] = (
-                f"{dlq_count} jobs in dead letter queue — check /admin/dlq"
-            )
-
-        # Warn if failed jobs accumulating
-        if strategy_failed > 5 or trade_failed > 5:
-            queue_health["warning"] = (
-                f"High failure count: strategy={strategy_failed} trade={trade_failed}"
-            )
-
+        strategy = await _queue_counts(redis, "strategy-runner")
+        queue_health = {"status": "up", "strategy_runner": strategy}
+        if strategy["failed"] > 5:
+            queue_health["warning"] = f"High failure count:strategy={strategy['failed']}"
         health["checks"]["queues"] = queue_health
-
     except Exception as e:
         health["checks"]["queues"] = {"status": "error", "error": str(e)}
         log.error("health.queue_check_failed", error=str(e))
@@ -124,8 +95,7 @@ async def get_health() -> dict:
 
     # ── Outbound rate limiter ──────────────────────────────────────────────────
     try:
-        rl_status = await kotak_limiter.get_rates()
-        health["checks"]["outbound_rate_limiter"] = rl_status
+        health["checks"]["outbound_rate_limiter"] = await kotak_limiter.get_rates()
     except Exception as e:
         health["checks"]["outbound_rate_limiter"] = {"status": "error", "error": str(e)}
 
@@ -136,20 +106,17 @@ async def get_health() -> dict:
 
         health["checks"]["circuit_breakers"] = {
             "status": "degraded" if any_open else "up",
-            "brekers": breaker_states,
+            "breakers": breaker_states,
         }
 
         if any_open:
-            health["status"] = "degraded"
-            open_names = [
-                name for name, info in breaker_states.items()
-                if info["state"] == "open"
-            ]
+            if health["status"] == "healthy":
+                health["status"] = "degraded"
             log.error(
                 "health.circuit_breaker_open",
-                open_breakers=open_names,
+                open_breakers=[n for n, i in breaker_states.items() if i["state"] == "open"]
             )
     except Exception as e:
-            health["checks"]["circuit_breakers"] = {"status": "error", "error": str(e)}
+        health["checks"]["circuit_breakers"] = {"status": "error", "error": str(e)}
 
     return health

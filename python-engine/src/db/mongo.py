@@ -11,17 +11,17 @@ async def connect_db() -> None:
     _client = AsyncIOMotorClient(settings.mongo_uri)
     # Ping to verify connection
     await _client.admin.command("ping")
-    log.info("mongodb Connected", uri=settings.mongo_uri)
+    log.info("mongodb.connected")
 
 async def disconnect_db() -> None:
     global _client
     if _client:
         _client.close()
+        _client = None
         log.info("mongodb.disconnected")
-
 
 async def get_db() -> AsyncIOMotorDatabase:
     if _client is None:
         raise RuntimeError("MongoDB not connected. Call connect_db() first.")
-    return _client.get_database("test")
+    return _client.get_default_database(default=settings.mongo_db_name)
 

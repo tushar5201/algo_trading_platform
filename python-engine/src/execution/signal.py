@@ -18,6 +18,7 @@ class OrderType(str, Enum):
 class ProductType(str, Enum):
     MIS = "MIS"  # intraday'
     NRML = "NRML"  # positional
+    CNC = "CNC" # delivery
 
 
 class Exchange(str, Enum):
@@ -40,6 +41,7 @@ class Signal:
     reason: str = ""
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    max_open_positions: Optional[int] = None
     metadata: dict = field(default_factory=dict)
 
     def is_actionable(self) -> bool:

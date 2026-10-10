@@ -1,7 +1,7 @@
-import {useState, useEffect} from 'react';
-import {useQuery, useMutation, useQueryClient} from '@tanstack/react-query';
-import {Key, ShieldCheck, CheckCircle, AlertCircle, ChevronRight} from 'lucide-react';
-import {api} from '../../api/client';
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Key, ShieldCheck, CheckCircle, AlertCircle, ChevronRight } from 'lucide-react';
+import { api } from '../../api/client';
 
 type Step = 'credentials' | 'mpin' | 'done';
 
@@ -12,7 +12,7 @@ export default function CredentialsPage() {
     const [credentialsStored, setCredentialsStored] = useState(false);
     const qc = useQueryClient();
 
-    const {data: sessionData} = useQuery({
+    const { data: sessionData } = useQuery({
         queryKey: ['kotak-session'],
         queryFn: () => api.get('/user/kotak/auth-status').then(r => r.data.data),
         refetchInterval: 10_000,
@@ -59,7 +59,7 @@ export default function CredentialsPage() {
             .then((data: any) => {
                 if (!mounted) return;
                 if (data) {
-                    setForm(f => ({...f, ...data}));
+                    setForm(f => ({ ...f, ...data }));
                     setCredentialsStored(true);
                 }
             })
@@ -73,11 +73,11 @@ export default function CredentialsPage() {
     const [mpin, setMpin] = useState('');
 
     const mpinMutation = useMutation({
-        mutationFn: () => api.post('/user/kotak/mpin', {mpin}),
+        mutationFn: () => api.post('/user/kotak/mpin', { mpin }),
         onSuccess: () => {
             setMsg('Session activated!');
             setStep('done');
-            qc.invalidateQueries({queryKey: ['kotak-session']});
+            qc.invalidateQueries({ queryKey: ['kotak-session'] });
         },
         onError: (e: any) => setErr(e.response?.data?.message ?? 'MPIN failed'),
     });
@@ -107,16 +107,16 @@ export default function CredentialsPage() {
     );
 
     const credentialsFields = [
-        {key: 'clientId', label: 'Client ID / UCC', type: 'text', ph: 'AB1234'},
-        {key: 'apiKey', label: 'API access token', type: 'text', ph: 'From NEO dashboard'},
-        {key: 'apiSecret', label: 'API secret (optional)', type: 'password', ph: '••••••'},
-        {key: 'mobileNumber', label: 'Mobile (+91XXXXXXXXXX)', type: 'tel', ph: '+919999999999'},
-        {key: 'password', label: 'Kotak password', type: 'password', ph: '••••••••'},
+        { key: 'clientId', label: 'Client ID / UCC', type: 'text', ph: 'AB1234' },
+        { key: 'apiKey', label: 'API access token', type: 'text', ph: 'From NEO dashboard' },
+        { key: 'apiSecret', label: 'API secret (optional)', type: 'password', ph: '••••••' },
+        { key: 'mobileNumber', label: 'Mobile (+91XXXXXXXXXX)', type: 'tel', ph: '+919999999999' },
+        { key: 'password', label: 'Kotak password', type: 'password', ph: '••••••••' },
     ];
 
     const totpFields = [
-        {key: 'accessToken', label: 'NEO dashboard access token', type: 'text', ph: 'Your access token'},
-        {key: 'totp', label: 'TOTP (6 digits)', type: 'text', ph: '847291', maxLength: 6},
+        { key: 'accessToken', label: 'NEO dashboard access token', type: 'text', ph: 'Your access token' },
+        { key: 'totp', label: 'TOTP (6 digits)', type: 'text', ph: '847291', maxLength: 6 },
     ];
 
     const steps = ['credentials', 'mpin', 'done'];
@@ -136,20 +136,18 @@ export default function CredentialsPage() {
             </div>
 
             {/* Session status */}
-            <div className={`flex items-center gap-3 p-4 rounded-xl border ${
-                sessionData?.hasActiveSession
-                    ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800'
-                    : 'bg-gray-50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700'
-            }`}>
+            <div className={`flex items-center gap-3 p-4 rounded-xl border ${sessionData?.hasActiveSession
+                ? 'bg-emerald-50 dark:bg-emerald-900/20 border-emerald-200 dark:border-emerald-800'
+                : 'bg-gray-50 dark:bg-gray-800/50 border-gray-200 dark:border-gray-700'
+                }`}>
                 {sessionData?.hasActiveSession
-                    ? <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400"/>
-                    : <Key className="w-5 h-5 text-gray-400"/>}
+                    ? <ShieldCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                    : <Key className="w-5 h-5 text-gray-400" />}
                 <div>
-                    <p className={`text-sm font-medium ${
-                        sessionData?.hasActiveSession
-                            ? 'text-emerald-800 dark:text-emerald-300'
-                            : 'text-gray-700 dark:text-gray-300'
-                    }`}>
+                    <p className={`text-sm font-medium ${sessionData?.hasActiveSession
+                        ? 'text-emerald-800 dark:text-emerald-300'
+                        : 'text-gray-700 dark:text-gray-300'
+                        }`}>
                         {sessionData?.hasActiveSession
                             ? `Session active — expires in ${sessionData.expiresInMinutes} minutes`
                             : 'No active broker session'}
@@ -180,20 +178,18 @@ export default function CredentialsPage() {
                 {['Submit login', 'Submit MPIN', 'Done'].map((label, i) => (
                     <div key={i} className="flex items-center gap-2 flex-1">
                         <div className={`w-6 h-6 rounded-full flex items-center justify-center
-                            text-xs font-semibold shrink-0 ${
-                            i < stepIdx ? 'bg-emerald-500 text-white' :
+                            text-xs font-semibold shrink-0 ${i < stepIdx ? 'bg-emerald-500 text-white' :
                                 i === stepIdx ? 'bg-brand-600 text-white' :
                                     'bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400'
-                        }`}>
+                            }`}>
                             {i < stepIdx ? '✓' : i + 1}
                         </div>
-                        <span className={`text-xs hidden sm:block ${
-                            i === stepIdx
-                                ? 'text-gray-900 dark:text-white font-medium'
-                                : 'text-gray-400 dark:text-gray-500'
-                        }`}>{label}</span>
+                        <span className={`text-xs hidden sm:block ${i === stepIdx
+                            ? 'text-gray-900 dark:text-white font-medium'
+                            : 'text-gray-400 dark:text-gray-500'
+                            }`}>{label}</span>
                         {i < 2 && (
-                            <ChevronRight className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0"/>
+                            <ChevronRight className="w-3 h-3 text-gray-300 dark:text-gray-600 shrink-0" />
                         )}
                     </div>
                 ))}
@@ -204,7 +200,7 @@ export default function CredentialsPage() {
                 <div className="flex items-center gap-2 p-3 rounded-xl
                         bg-emerald-50 dark:bg-emerald-900/20
                         border border-emerald-200 dark:border-emerald-800">
-                    <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400"/>
+                    <CheckCircle className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
                     <p className="text-sm text-emerald-700 dark:text-emerald-400">{msg}</p>
                 </div>
             )}
@@ -212,7 +208,7 @@ export default function CredentialsPage() {
                 <div className="flex items-center gap-2 p-3 rounded-xl
                         bg-red-50 dark:bg-red-900/20
                         border border-red-200 dark:border-red-800">
-                    <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400"/>
+                    <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
                     <p className="text-sm text-red-700 dark:text-red-400">{err}</p>
                     <button onClick={clear} className="ml-auto text-red-400 hover:text-red-600 text-xs">
                         Dismiss
@@ -236,28 +232,28 @@ export default function CredentialsPage() {
                             </p>
                             <p className="text-sm text-gray-500 dark:text-gray-400">
                                 Mobile: {((form as any).mobileNumber ?? '').length ?
-                                `${(form as any).mobileNumber.slice(0,6)}••••${(form as any).mobileNumber.slice(-2)}` : 'N/A'}
+                                    `${(form as any).mobileNumber.slice(0, 6)}••••${(form as any).mobileNumber.slice(-2)}` : 'N/A'}
                             </p>
                             <button className="btn-secondary" onClick={() => setCredentialsStored(false)}>Use different credentials</button>
                         </div>
                     ) : (
-                        credentialsFields.map(({key, label, type, ph}) => renderInputField(
+                        credentialsFields.map(({ key, label, type, ph }) => renderInputField(
                             key,
                             label,
                             type,
                             ph,
                             (form as any)[key],
-                            value => setForm(f => ({...f, [key]: value})),
+                            value => setForm(f => ({ ...f, [key]: value })),
                         ))
                     )}
 
-                    {totpFields.map(({key, label, type, ph, maxLength}) => renderInputField(
+                    {totpFields.map(({ key, label, type, ph, maxLength }) => renderInputField(
                         key,
                         label,
                         type,
                         ph,
                         (form as any)[key],
-                        value => setForm(f => ({...f, [key]: value})),
+                        value => setForm(f => ({ ...f, [key]: value })),
                         maxLength,
                     ))}
 
@@ -313,7 +309,7 @@ export default function CredentialsPage() {
             {/* Done */}
             {step === 'done' && (
                 <div className="card p-8 text-center">
-                    <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto mb-4"/>
+                    <CheckCircle className="w-12 h-12 text-emerald-500 mx-auto mb-4" />
                     <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
                         Session active!
                     </h2>

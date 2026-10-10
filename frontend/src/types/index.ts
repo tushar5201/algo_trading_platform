@@ -25,8 +25,13 @@ export interface Trade {
     side: 'BUY' | 'SELL';
     qty: number;
     price: number;
-    status: 'PENDING' | 'FAILED' | 'EXECUTED' | 'CANCELLED' | 'CLOSED';
+    status: 'PENDING' | 'EXIT_PENDING' | 'NEEDS_REVIEW' | 'CANCELED' | 'FAILED' | 'EXECUTED' | 'CLOSED';
     pnl: number | null;
+    stopLoss?: number | null;
+    takeProfit?: number | null;
+    exitPrice?: number | null;
+    exitReason?: string | null;
+    errorMessage?: string | null;
     orderId: string | null;
     createdAt: string;
     executedAt: string | null;
@@ -38,6 +43,7 @@ export interface PnLSummary {
     winTrades: number;
     lossTrades: number;
     winRate: string;
+    openPositions?: number;
     bestTrade: number;
     worstTrade: number;
 }

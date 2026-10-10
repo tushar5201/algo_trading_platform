@@ -1,8 +1,15 @@
 import asyncio
+import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from bson import ObjectId
 
+from src.broker.errors import KotakOrderUncertainError
+from src.db.audit import write_audit
+from src.db.redis_client import get_redis
+from src.execution.order_status import poll_order, classify
+from src.execution.risk_manager import reference_price
 from src.broker.base_broker import BaseBroker
 from src.broker.kotak_neo import KotakAuthError, KotakAPIError
 from src.db.mongo import get_db
@@ -12,44 +19,46 @@ from src.execution.signal import Signal, SignalAction
 import structlog
 
 from src.utils.market_data import get_scrip_master
+from src.utils.market_data import fetch_ltp
 
 log = structlog.get_logger()
 
-# Order status polling config
-POLL_INTERVAL_SEC = 2
-POLL_MAX_ATTEMPTS = 15
-
-# Kotak order status values
-FILLED_STATUSES = {"filled", "complete", "traded"}
-REJECTED_STATUSES = {"rejected", "cancelled", "cancel"}
-PENDING_STATUSES = {
-    "open",
-    "pending",
-    "open pending",
-    "after market order req received",
-}
+LOCK_TTL_SEC = 180
+_RELEASE_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
 
 class OrderManager:
     def __init__(self) -> None:
         self.risk_manager = RiskManager()
 
+    async def _acquire_lock(self, key: str) -> Optional[str]:
+        token = uuid.uuid4().hex
+        ok = await get_redis().set(key, token, nx=True, ex=LOCK_TTL_SEC)
+        return token if ok else None
+
+    async def _release_lock(self, key: str, token: str) -> None:
+        try:
+            await get_redis().eval(_RELEASE_LUA, 1, key, token)
+        except Exception as e:
+            log.warning("order.lock_release_failed", key=key, error=str(e))
+
     async def execute(
             self, signal: Signal, user_id: str, broker: BaseBroker, credentials: dict
     ) -> dict:
-        """
-        Full trade lifecycle:
-            1. Validate signal
-            2. Risk check
-            3. Margin check
-            4. Create trade doc (PENDING)
-            5. Place order
-            6. Poll until filled / rejected / timeout
-            7. Calculate PnL
-            8. Update Trade doc
-            9. Write audit log
-        Returns result dict.
-        """
+        lock_key = f"order_lock:{user_id}:{signal.strategy_name}"
+        token = await self._acquire_lock(lock_key)
+        if token is None:
+            log.warning("order.locked", user_id=user_id, strategy=signal.strategy_name)
+            return {"success": False, "stage": "lock",
+                    "reason": "Another order for this user/strategy is in progress"}
+        try:
+            return await self._execute_locked(signal, user_id, broker, credentials)
+        finally:
+            await self._release_lock(lock_key, token)
+
+    async def _execute_locked(
+            self, signal: Signal, user_id: str, broker: BaseBroker, credentials: dict
+    ) -> dict:
         db = await get_db()
 
         # 1. validate
@@ -63,74 +72,55 @@ class OrderManager:
         risk = await self.risk_manager.check(signal, user_id)
         if not risk.passed:
             log.warning("order.risk_blocked", user_id=user_id, reason=risk.reason)
-            await self._write_audit(
-                db,
+            await write_audit(
                 user_id,
                 "TRADE_RISK_BLOCKED",
                 {"reason": risk.reason, "symbol": signal.symbol},
             )
             return {"success": False, "stage": "risk", "reason": risk.reason}
 
-        broker_symbol = signal.symbol
-        scrip = get_scrip_master()
-        if scrip:
-            resolve = scrip.resolve_trading_symbol(signal.symbol)
-            if resolve:
-                broker_symbol = resolve
-                resolve_pair = scrip.resolve(resolve)
-                if resolve_pair:
-                    _, token = resolve_pair
-                    signal.metadata = {**(signal.metadata or {}), "symbol_token": token}
-            else:
-                log.warning(
-                    "order.symbol_not_resolved",
-                    symbol=signal.symbol,
-                    note="No matching pTrdSymbol found in scrip master;"
-                         "sending symbol as-is, order will likely be rejected."
-                )
+        broker_symbol, segment, token = self._resolve_instrument(signal)
+        if token:
+            signal.metadata = {**(signal.metadata or {}), "symbol_token": token}
 
-        # 3. Margin check
-        margin_ok = await self._check_margin(broker, signal, credentials)
-        if not margin_ok:
-            log.warning(
-                "order.insufficient_margin", user_id=user_id, symbol=signal.symbol
-            )
-            return {
-                "success": False,
-                "stage": "margin",
-                "reason": "Insufficient margin for this order",
-            }
+        if not await self._check_margin(broker, signal):
+            log.warning("order.insufficient_margin", user_id=user_id, symbol=signal.symbol)
+            return {"success": False, "stage": "margin", "reason": "Insufficient margin for this order"}
 
         # 4. Create trade doc
-        trade_id = await self._create_trade_doc(db, signal, user_id)
+        trade_id = await self._create_trade_doc(db, signal, user_id, broker_symbol, segment, token)
         log.info("order.trade_doc_created", trade_id=trade_id, symbol=signal.symbol)
 
         # 5. Place Order
         try:
-            if signal.stop_loss and hasattr(broker, "place_order_with_sl"):
-                order_result = await broker.place_order_with_sl(
-                    symbol=broker_symbol,
-                    side=signal.action.value,
-                    qty=signal.qty,
-                    price=signal.price,
-                    order_type=signal.order_type.value,
-                    product_type=signal.product_type.value,
-                    exchange=signal.exchange.value,
-                    stop_loss=signal.stop_loss,
-                )
-            else:
-                order_result = await broker.place_order(
-                    symbol=broker_symbol,
-                    side=signal.action.value,
-                    qty=signal.qty,
-                    price=signal.price,
-                    order_type=signal.order_type.value,
-                    product_type=signal.product_type.value,
-                    exchange=signal.exchange.value,
-                )
+            order_result = await broker.place_order(
+                symbol=broker_symbol,
+                side=signal.action.value,
+                qty=signal.qty,
+                price=signal.price,
+                order_type=signal.order_type.value,
+                product_type=signal.product_type.value,
+                exchange=signal.exchange.value,
+            )
             order_id = order_result.get("order_id", "")
+        except KotakOrderUncertainError as e:
+            await self._set(db, trade_id, {"status": "NEEDS_REVIEW", "errorMessage": str(e)})
+            await write_audit(
+                user_id,
+                "TRADE_ORDER_UNCERTAIN",
+                {
+                    "trade_id": trade_id,
+                    "symbol": signal.symbol,
+                    "error": str(e)
+                }
+            )
+            return {"success": False, "stage": "uncertain", "reason": str(e), "trade_id": trade_id}
         except KotakAuthError as e:
             await self._mark_failed(db, trade_id, str(e))
+            invalidate = getattr(broker, "invalidate_session", None)
+            if invalidate:
+                await invalidate()
+
             return {
                 "success": False,
                 "stage": "auth",
@@ -139,8 +129,7 @@ class OrderManager:
             }
         except KotakAPIError as e:
             await self._mark_failed(db, trade_id, str(e))
-            await self._write_audit(
-                db,
+            await write_audit(
                 user_id,
                 "TRADE_ORDER_FAILED",
                 {"trade_id": trade_id, "symbol": signal.symbol, "error": str(e)},
@@ -152,8 +141,8 @@ class OrderManager:
                 "trade_id": trade_id,
             }
         except Exception as e:
-            await self._mark_failed(db, trade_id, str(e))
             log.error("order.unexpected_error", error=str(e), exc_info=True)
+            await self._set(db, trade_id, {"status": "NEEDS_REVIEW", "errorMessage": f"Unexpected: {e}"})
             return {
                 "success": False,
                 "stage": "unknown",
@@ -161,59 +150,53 @@ class OrderManager:
                 "trade_id": trade_id,
             }
 
-        await db.trades.update_one(
-            {"_id": ObjectId(trade_id)}, {"$set": {"orderId": order_id}}
-        )
-        log.info("order.place", trade_id=trade_id, symbol=signal.symbol)
+        await self._set(db, trade_id, {"orderId": order_id})
+        log.info("order.place", trade_id=trade_id, symbol=signal.symbol, order_id=order_id)
 
         # 6. Poll order status
-        fill_result = await self._poll_order_status(broker, order_id, trade_id)
-        if not fill_result["filled"]:
-            await self._mark_failed(db, trade_id, fill_result["reason"])
-            await self._write_audit(
-                db,
-                user_id,
-                "TRADE_FILL_FAILED",
-                {
-                    "trade_id": trade_id,
-                    "order_id": order_id,
-                    "reason": fill_result["reason"],
-                },
-            )
-            return {
-                "success": False,
-                "stage": "fill",
-                "reason": fill_result["reason"],
+        fill = await poll_order(broker, order_id)
+        if fill["outcome"] == "timeout":
+            fill = await self._resolve_timeout(broker, order_id)
+
+        if fill["outcome"] == "unknown":
+            await self._set(db, trade_id, {"status": "NEEDS_REVIEW", "errorMessage": fill["reason"]})
+            await write_audit(user_id, "TRADE_FILL_UNKNOWN", {
                 "trade_id": trade_id,
-                "order_id": order_id,
-            }
+                "orderId": order_id,
+                "reason": fill["reason"],
+            })
+            return {"success": False, "stage": "fill", "reason": fill["reason"],
+                    "trade_id": trade_id, "order_id": order_id}
+
+        if fill["outcome"] != "filled":
+            await self._mark_failed(db, trade_id, fill["reason"])
+            await write_audit(user_id, "TRADE_FILL_FAILED",
+                              {"trade_id": trade_id, "order_id": order_id, "reason": fill["reason"]})
+            return {"success": False, "stage": "fill", "reason": fill["reason"],
+                    "trade_id": trade_id, "order_id": order_id}
 
         # 7. Calculate PnL
-        fill_price = fill_result.get("avg_price", signal.price)
-        pnl = self._calculate_pnl(signal, fill_price)
+        fill_price = await self._determine_fill_price(fill["avg_price"], signal, segment, token)
+        if fill_price is None:
+            msg = "Order filled but the fill price could not be determined"
+            await self._set(db, trade_id, {"status": "NEEDS_REVIEW", "errorMessage": msg})
+            await write_audit(user_id, "TRADE_FILL_PRICE_UNKNOWN", {
+                "trade_id": trade_id,
+                "orderId": order_id
+            })
+            return {"success": False, "stage": "fill", "reason": msg, "trade_id": trade_id, "order_id": order_id}
 
-        # 8. Update Trade doc -> EXECUTED
-        await db.trades.update_one(
-            {"_id": ObjectId(trade_id)},
-            {
-                "$set": {
-                    "status": "EXECUTED",
-                    "orderId": order_id,
-                    "price": fill_price,
-                    "pnl": pnl,
-                    "executedAt": datetime.now(timezone.utc),
-                    "metadata": {
-                        **signal.metadata,
-                        "slOrderId": order_result.get("sl_order_id"),
-                        "fillResult": fill_result,
-                    },
-                }
-            },
-        )
+        await self._set(db, trade_id, {
+            "status": "EXECUTED",
+            "orderId": order_id,
+            "price": fill_price,
+            "pnl": None,
+            "executedAt": datetime.now(timezone.utc),
+            "metadata": {**(signal.metadata or {}), "fillResult": fill},
+        })
 
-        # 9. Audit log
-        await self._write_audit(
-            db,
+        sl_order_id = await self._place_protective_stop(db, broker, signal, user_id, trade_id, broker_symbol)
+        await write_audit(
             user_id,
             "TRADE_EXECUTED",
             {
@@ -223,43 +206,123 @@ class OrderManager:
                 "side": signal.action.value,
                 "qty": signal.qty,
                 "fill_price": fill_price,
-                "pnl": pnl,
-            },
-        )
+                "sl_order_id": sl_order_id
+            })
 
         log.info(
             "order.complete",
             trade_id=trade_id,
             order_id=order_id,
             fill_price=fill_price,
-            pnl=pnl,
+            sl_order_id=sl_order_id
         )
         return {
             "success": True,
             "trade_id": trade_id,
             "order_id": order_id,
             "fill_price": fill_price,
-            "pnl": pnl,
+            "sl_order_id": sl_order_id,
             "symbol": signal.symbol,
             "side": signal.action.value,
             "qty": signal.qty,
         }
 
+    def _resolve_instrument(self, signal: Signal) -> tuple[str, Optional[str], Optional[str]]:
+        scrip = get_scrip_master()
+        if not scrip or not getattr(scrip, "_loaded", False):
+            return signal.symbol, None, None
+
+        trading_symbol = scrip.resolve_trading_symbol(signal.symbol)
+        if not trading_symbol and scrip.get_token(signal.symbol):
+            trading_symbol = signal.symbol
+        if not trading_symbol:
+            log.warning(
+                "order.symbol_not_resolved",
+                symbol=signal.symbol,
+                note="No matching pTrdSymbol in scrip master; sending as-is, order will likely be rejected.",
+            )
+            return signal.symbol, None, None
+        pair = scrip.resolve(trading_symbol)
+        if pair:
+            return trading_symbol, pair[0], pair[1]
+        return trading_symbol, None, None
+
+    async def _determine_fill_price(
+            self, avg_price: float, signal: Signal, segment: Optional[str], token: Optional[str]
+    ) -> Optional[float]:
+        if avg_price and avg_price > 0:
+            return float(avg_price)
+        ref = reference_price(signal)
+        if ref:
+            log.warning("order.fill_price_fallback", source="signal_reference", price=ref)
+            return ref
+        if segment and token:
+            try:
+                ltp = await fetch_ltp(segment, token)
+                if ltp:
+                    log.warning("order.fill_price_fallback", source="ltp", ltp=ltp)
+                    return ltp
+            except Exception as e:
+                log.warning("order.fill_price_ltp_failed", error=str(e))
+        return None
+
+    async def _resolve_timeout(self, broker: BaseBroker, order_id: str) -> dict:
+        """Entry not filled in time. Cancel it, then re-check - it may have filled in the meantime."""
+        cancelled = False
+        try:
+            cancelled = bool(await broker.cancel_order(order_id))
+        except Exception as e:
+            log.warning("order.cancel_failed", order_id=order_id, error=str(e))
+
+        try:
+            status = await broker.get_order_status(order_id)
+            kind = classify(status.get("status", ""))
+            if kind == "filled":
+                return {"outcome": "filled", "avg_price": float(status.get("avg_price") or 0),
+                        "reason": "Order filled while cancelling"}
+            if kind == "rejected":
+                return {"outcome": "rejected", "avg_price": 0.0, "reason": "Order cancelled after timeout"}
+        except Exception as e:
+            log.warning("order.recheck_failed", order_id=order_id, error=str(e))
+
+        if cancelled:
+            return {"outcome": "rejected", "avg_price": 0.0, "reason": "Order not filled in time; cancelled"}
+        return {"outcome": "unknown", "avg_price": 0.0,
+                "reason": "Order not filled in time and could not be cancelled - check the broker order book"}
+
+    async def _place_protective_stop(
+            self, db, broker: BaseBroker, signal: Signal, user_id: str, trade_id: str, broker_symbol: str
+    ) -> Optional[str]:
+        if not signal.stop_loss or signal.stop_loss <= 0:
+            return None
+        try:
+            result = await broker.place_sl_order(
+                symbol=broker_symbol,
+                position_side=signal.action.value,
+                qty=signal.qty,
+                trigger_price=float(signal.stop_loss),
+                product_type=signal.product_type.value,
+                exchange=signal.exchange.value,
+            )
+            sl_order_id = result.get("order_id") or None
+            await self._set(db, trade_id, {"slOrderId": sl_order_id})
+            return sl_order_id
+        except Exception as e:
+            # Not fatal: the SL/TP monitor still watches the price. But never silent.
+            log.error("order.sl_placement_failed", trade_id=trade_id, error=str(e))
+            await write_audit(user_id, "TRADE_SL_PLACEMENT_FAILED",
+                              {"trade_id": trade_id, "error": str(e)})
+            return None
+
     # Helpers
-    async def _check_margin(
-            self, broker: BaseBroker, signal: Signal, credentials: dict
-    ) -> bool:
-        """
-        Returns True if margin is sufficient. Non-blocking on error.
-        """
+    async def _check_margin(self, broker: BaseBroker, signal: Signal) -> bool:
+        """Returns True if margin is sufficient. Non-blocking on error (the broker re-checks)."""
         try:
             if not hasattr(broker, "check_margin"):
                 return True
-            symbol_token = signal.metadata.get("symbol_token", "")
+            symbol_token = (signal.metadata or {}).get("symbol_token", "")
             if not symbol_token:
-                log.warning(
-                    "order.margin_check_skipped", reason="No symbol token in metadata"
-                )
+                log.warning("order.margin_check_skipped", reason="No symbol token in metadata")
                 return True
             result = await broker.check_margin(
                 exchange=signal.exchange.value,
@@ -273,10 +336,20 @@ class OrderManager:
             rms_validated = result.get("rmsVldtd", "NOT_OK")
             insuf_fund = float(result.get("insufFund", "0") or "0")
             if rms_validated == "NOT_OK" and insuf_fund > 0:
+                # Log everything Kotak returned so it can be compared with the Funds screen
+                # (wallet balance, available margin and margin used are three different numbers).
                 log.warning(
                     "order.insufficient_margin",
                     insuf_fund=insuf_fund,
                     avl_margin=result.get("avlMrgn"),
+                    avl_cash=result.get("avlCash"),
+                    order_margin=result.get("ordMrgn"),
+                    required_margin=result.get("reqdMrgn"),
+                    margin_used=result.get("totMrgnUsd"),
+                    rms=rms_validated,
+                    qty=signal.qty,
+                    symbol=signal.symbol,
+                    raw=result,
                 )
                 return False
             return True
@@ -284,106 +357,49 @@ class OrderManager:
             log.warning("order.margin_check_error", error=str(e))
             return True
 
-    async def _poll_order_status(
-            self, broker: BaseBroker, order_id: str, trade_id: str
-    ) -> dict:
-        """
-        Poll kotak order status until filled / rejected / timeout
-        Returns {filled: bool, reason: str, avg_price: float }
-        """
-        log.info("order.pollling_start", order_id=order_id)
-        for attempt in range(POLL_MAX_ATTEMPTS):
-            await asyncio.sleep(POLL_INTERVAL_SEC)
-            try:
-                status = await broker.get_order_status(order_id)
-                order_status = status.get("status", "").lower().strip()
-                log.debug(
-                    "order.poll",
-                    attempt=attempt + 1,
-                    order_id=order_id,
-                    status=order_status,
-                )
-                if order_status in FILLED_STATUSES:
-                    avg_price = float(status.get("avg_price") or 0)
-                    log.info("order.filled", order_id=order_id, avg_price=avg_price)
-                    return {
-                        "filled": True,
-                        "reason": "Order filled",
-                        "avg_price": avg_price,
-                        "status": order_status,
-                    }
-
-                if order_status in REJECTED_STATUSES:
-                    reason = status.get("raw", [{}])[0].get("rejRsn", "Order rejected")
-                    log.warning("order.rejected", order_id=order_id, reason=reason)
-                    return {
-                        "filled": False,
-                        "reason": reason,
-                        "avg_price": 0,
-                    }
-
-            except Exception as e:
-                log.warning("order.poll_error", attempt=attempt, error=str(e))
-        log.warning("order.poll_timeout", order_id=order_id)
-        return {
-            "filled": False,
-            "reason": f"Order timeout after {POLL_MAX_ATTEMPTS * POLL_INTERVAL_SEC}s",
-            "avg_price": 0,
-        }
-
-    async def _create_trade_doc(self, db, signal: Signal, user_id: str) -> str:
+    async def _create_trade_doc(
+            self, db, signal: Signal, user_id: str,
+            broker_symbol: str, segment: Optional[str], token: Optional[str],
+    ) -> str:
+        now = datetime.now(timezone.utc)
         doc = {
             "userId": ObjectId(user_id),
             "strategyName": signal.strategy_name,
             "symbol": signal.symbol,
+            "brokerSymbol": broker_symbol,
             "side": signal.action.value,
             "qty": signal.qty,
-            "price": signal.price,
+            "price": signal.price or reference_price(signal) or 0.0,
             "orderId": None,
             "status": "PENDING",
             "pnl": None,
+            "exchange": signal.exchange.value,
+            "exchangeSegment": segment,
+            "productType": signal.product_type.value,
+            "symbolToken": token,
             "stopLoss": signal.stop_loss,
             "takeProfit": signal.take_profit,
+            "slOrderId": None,
+            "exitPrice": None,
+            "exitOrderId": None,
+            "exitReason": None,
+            "exitAttempts": 0,
             "errorMessage": None,
             "executedAt": None,
+            "closedAt": None,
             "confidence": signal.confidence,
             "reason": signal.reason,
             "metadata": signal.metadata,
-            "createdAt": datetime.now(timezone.utc),
+            "createdAt": now,
+            "updatedAt": now,
         }
         result = await db.trades.insert_one(doc)
         return str(result.inserted_id)
 
-    def _calculate_pnl(self, signal: Signal, fill_price: float) -> float:
-        """
-        PnL for the entry order itself.
-        For BUY: negative(cost). PnL realized on exit.
-        For SELL: positive(cost).
-        Full PnL calculation requires tracking position exit - done in STEP 7
-        """
-        value = fill_price * signal.qty
-        if signal.action == SignalAction.BUY:
-            return round(-value, 2)
-        return round(value, 2)
+    async def _set(self, db, trade_id: str, fields: dict) -> None:
+        fields = {**fields, "updatedAt": datetime.now(timezone.utc)}
+        await db.trades.update_one({"_id": ObjectId(trade_id)}, {"$set": fields})
 
     async def _mark_failed(self, db, trade_id: str, error: str) -> None:
-        await db.trades.update_one(
-            {"_id": ObjectId(trade_id)},
-            {"$set": {"status": "FAILED", "errorMessage": error}},
-        )
+        await self._set(db, trade_id, {"status": "FAILED", "errorMessage": error})
         log.error("order.mark_failed", trade_id=trade_id, error=error)
-
-    async def _write_audit(self, db, user_id: str, action: str, metadata: dict) -> None:
-        try:
-            await db.audit_logs.insert_one(
-                {
-                    "actorId": ObjectId(user_id),
-                    "actorRole": "system",
-                    "action": action,
-                    "targetId": None,
-                    "metadata": metadata,
-                    "createdAt": datetime.now(timezone.utc),
-                }
-            )
-        except Exception as e:
-            log.error("order.audit_write_failed", error=str(e))

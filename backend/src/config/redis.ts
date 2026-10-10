@@ -3,7 +3,7 @@ import { env } from "./env";
 
 export const redis = new Redis({
     host: env.REDIS_HOST,
-    port: parseInt(env.REDIS_PORT),
+    port: parseInt(env.REDIS_PORT, 10),
     maxRetriesPerRequest: null,
     lazyConnect: true
 });

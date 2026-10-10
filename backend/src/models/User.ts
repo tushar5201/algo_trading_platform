@@ -58,7 +58,7 @@ const UserSchema = new Schema<IUser> ({
     encryptedCredentials: {
         type: String,
         default: null,
-        select: false
+        select: true
     },
     autoTrading: {
         type: Boolean,

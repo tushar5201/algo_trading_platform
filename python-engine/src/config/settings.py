@@ -6,15 +6,20 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file='.env',
         env_file_encoding='utf-8',
-        extra='ignore'
+        extra='ignore',
+        validate_default=True,
+        str_strip_whitespace=True
     )
     # App
     log_level: str = 'INFO'
     node_env: str = 'development'
     use_mock_broker: bool = False
 
+    allow_after_hours_orders: bool = True
+
     # MongoDB
     mongo_uri: str = ''
+    mongo_db_name: str = 'test'
 
     # Redis
     redis_host: str = "redis"
@@ -24,7 +29,9 @@ class Settings(BaseSettings):
     aes_secret_key: str = ""
 
     # Kotak Neo
-    kotak_base_url: str = "https://mis.kotaksecurities.com"
+    kotak_base_url: str = "https://gw-napi.kotaksecurities.com"
+
+    health_port: int = 8001
 
     @field_validator("mongo_uri")
     @classmethod

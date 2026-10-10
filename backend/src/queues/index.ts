@@ -9,8 +9,7 @@ export const queueConnection = {
 export const strategyQueue = new Queue("strategy-runner", {
     connection: queueConnection,
     defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: "exponential", delay: 5000 },
+        attempts: 1,
         removeOnComplete: { count: 100 },
         removeOnFail: { count: 200 },
     }
@@ -19,8 +18,7 @@ export const strategyQueue = new Queue("strategy-runner", {
 export const tradeQueue = new Queue("trade-executor", {
     connection: queueConnection,
     defaultJobOptions: {
-        attempts: 3,
-        backoff: { type: "fixed", delay: 3000 },
+        attempts: 1,
         removeOnComplete: { count: 500 },
         removeOnFail: { count: 500 },
     },
@@ -38,10 +36,10 @@ strategyQueueEvents.on("failed", ({ jobId, failedReason }) => {
     console.error(`[Queue] Strategy-runner job ${jobId} failed: ${failedReason}`);
 });
 
-tradeQueueEvents.on("completed", ({ jobId }) => {
-    console.log(`[Queue] Trade-executor job ${jobId} completed successfully.`);
-});
-
 tradeQueueEvents.on("failed", ({ jobId, failedReason }) => {
     console.error(`[Queue] Trade-executor job ${jobId} failed: ${failedReason}`);
 });
+
+strategyQueueEvents.on("error", (err) => console.error("[Queue] strategy events error:", err.message))
+tradeQueueEvents.on("error", (err) => console.error("[Queue] trade events error:", err.message))
+

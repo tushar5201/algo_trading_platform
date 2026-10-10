@@ -22,10 +22,24 @@ export default function AdminDashboard() {
         refetchInterval: 30_000,
     });
 
+    const { data: killData, refetch: refetchKill } = useQuery({
+        queryKey: ['kill-switch'],
+        queryFn:  () => api.get('/admin/kill-switch').then(r => r.data.data),
+        refetchInterval: 15_000,
+    });
+
     const killMutation = useMutation({
         mutationFn: (active: boolean) =>
             api.post('/admin/kill-switch', { isActive: active, reason: 'Admin manual trigger' }),
+        onSuccess: () => { refetchKill(); },
     });
+
+    const toggleKill = (active: boolean) => {
+        const msg = active
+            ? 'Stop ALL automated trading for every user?'
+            : 'Resume automated trading for all users?';
+        if (window.confirm(msg)) killMutation.mutate(active);
+    };
 
     const pending = usersData?.users?.filter((u: any) => u.status === 'PENDING') ?? [];
     const sr      = queueData?.strategyRunner ?? {};
@@ -46,7 +60,7 @@ export default function AdminDashboard() {
                 {/* Global kill switch */}
                 <div className="flex gap-3">
                     <button
-                        onClick={() => killMutation.mutate(true)}
+                        onClick={() => toggleKill(true)}
                         disabled={killMutation.isPending}
                         className="btn-danger"
                     >
@@ -54,7 +68,7 @@ export default function AdminDashboard() {
                         Kill all trading
                     </button>
                     <button
-                        onClick={() => killMutation.mutate(false)}
+                        onClick={() => toggleKill(false)}
                         disabled={killMutation.isPending}
                         className="btn-secondary"
                     >
@@ -62,6 +76,18 @@ export default function AdminDashboard() {
                     </button>
                 </div>
             </div>
+
+            {killData?.isActive && (
+                <div className="rounded-lg border border-red-300 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-700 dark:text-red-300">
+                    Global kill switch is ACTIVE: no new orders are being placed.
+                    {killData.reason ? ` Reason: ${killData.reason}` : ''}
+                </div>
+            )}
+            {killMutation.isError && (
+                <div className="rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700">
+                    Could not change the kill switch. Please try again.
+                </div>
+            )}
 
             {/* Stat cards */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -127,17 +153,17 @@ export default function AdminDashboard() {
                     </div>
                     <div className="space-y-3">
                         {[
-                            { label: 'Strategy runner — waiting', value: sr.waiting ?? 0 },
-                            { label: 'Strategy runner — active',  value: sr.active  ?? 0 },
-                            { label: 'Strategy runner — failed',  value: sr.failed  ?? 0, warn: true },
-                            { label: 'Trade executor — waiting',  value: te.waiting ?? 0 },
-                            { label: 'Trade executor — failed',   value: te.failed  ?? 0, warn: true },
+                            { label: 'Strategy runner — waiting', value: sr.waiting ?? '—' },
+                            { label: 'Strategy runner — active',  value: sr.active  ?? '—' },
+                            { label: 'Strategy runner — failed',  value: sr.failed  ?? '—', warn: true },
+                            { label: 'Trade executor — waiting',  value: te.waiting ?? '—' },
+                            { label: 'Trade executor — failed',   value: te.failed  ?? '—', warn: true },
                         ].map(({ label, value, warn }) => (
                             <div key={label} className="flex items-center justify-between">
                                 <span className="text-xs text-gray-600 dark:text-gray-400">{label}</span>
                                 <span className={clsx(
                                     'text-xs font-semibold px-2 py-0.5 rounded-full',
-                                    warn && value > 0
+                                    warn && typeof value === 'number' && value > 0
                                         ? 'bg-red-100 dark:bg-red-900/20 text-red-700 dark:text-red-400'
                                         : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300'
                                 )}>
