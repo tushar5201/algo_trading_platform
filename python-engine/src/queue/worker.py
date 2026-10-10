@@ -1,26 +1,31 @@
 import asyncio
 import json
+from datetime import datetime, timezone
+
 import structlog
 from aiobreaker import CircuitBreakerError
 from bson import ObjectId
 from bullmq import Worker, Job
 
+from src.broker.factory import create_broker
+from src.execution.validator import halted_reason
 from src.broker.circuit_breaker import is_any_breaker_open
 from src.db.redis_client import get_redis
-from src.broker.kotak_neo import KotakNeoBroker, KotakAuthError
+from src.broker.kotak_neo import KotakAuthError
 from src.db.mongo import get_db
 from src.execution.order_manager import OrderManager
 from src.strategies.base import StrategyContext
 from src.strategies.registry import get_strategy
 from src.utils.crypto import decrypt
-from src.utils.market_data import get_market_data, init_market_data, _fetch_live_snapshot
+from src.utils.market_data import init_market_data, _fetch_live_snapshot
 from src.config.settings import settings
+from src.utils.market_data import has_market_data, bind_market_data_user
 
 log = structlog.get_logger()
 
 STRATEGY_QUEUE = "strategy-runner"
-TRADE_QUEUE = "trade-executor"
 
+STRATEGY_CONCURRENCY = 5
 
 # Redis connection opts forwarded to bullmq Python lib (ioredis-compatible dict)
 def _redis_opts() -> dict:
@@ -40,37 +45,29 @@ class StrategyWorker:
     def __init__(self):
         self.order_manager = OrderManager()
         self._strategy_worker: Worker | None = None
-        self._trade_worker: Worker | None = None
+        self._stop_event= asyncio.Event()
 
     async def start(self) -> None:
-        log.info("worker.started", queues=[STRATEGY_QUEUE, TRADE_QUEUE])
-        connection = _redis_opts()
         self._strategy_worker = Worker(
             STRATEGY_QUEUE,
             self._handle_strategy_job,
-            {"connection": connection},
-        )
-        self._trade_worker = Worker(
-            TRADE_QUEUE,
-            self._handle_trade_job,
-            {"connection": connection},
+            {"connection": _redis_opts(), "concurrency": STRATEGY_CONCURRENCY},
         )
 
-        log.info("worker.listening", strategy_queue=STRATEGY_QUEUE, trade_queue=TRADE_QUEUE)
-
-        # Keep alive — bullmq Workers run their own asyncio tasks internally
-        try:
-            while True:
-                await asyncio.sleep(5)
-        except asyncio.CancelledError:
-            await self.stop()
+        log.info("worker.listening", strategy_queue=STRATEGY_QUEUE, concurrency=STRATEGY_CONCURRENCY)
+        await self._stop_event.wait()
+        await self._close_worker()
 
     async def stop(self) -> None:
         log.info("worker.stopping")
+        self._stop_event.set()
+
+    async def _close_worker(self) -> None:
         if self._strategy_worker:
-            await self._strategy_worker.close()
-        if self._trade_worker:
-            await self._trade_worker.close()
+            try:
+                await self._strategy_worker.close()
+            finally:
+                self._strategy_worker = None
 
     # ------------------------------------------------------------------ #
     #  Job handlers — called by bullmq Worker with a Job instance         #
@@ -82,66 +79,60 @@ class StrategyWorker:
         user_id = data["userId"]
         user_email = data["userEmail"]
         strategy_name = data["strategyName"]
-        auto_trading = data.get("autoTrading", False)
-        encrypted_creds = data["encryptedCredentials"]
 
         log.info("strategy_job.start", job_id=job.id, user_id=user_id, strategy=strategy_name)
 
-        # Decrypt broker credentials
+        halted = await halted_reason(user_id)
+        if halted:
+            log.warning("strategy_job.halted", user_id=user_id, reason=halted)
+            return {"status": "hold", "reason": halted}
+
+        auto_trading = await self._current_auto_trading(user_id, data.get("autoTrading", False))
+        # an admin's manual trigger runs now, regardless of the strategy's schedule
+        force = data.get("triggeredBy") == "ADMIN"
+
         try:
-            credentials = json.loads(decrypt(encrypted_creds))
+            credentials = json.loads(decrypt(data["encryptedCredentials"]))
         except Exception as e:
             raise Exception(f"Failed to decrypt credentials: {e}")
 
-        # Ensure market data client is initialised
-        if get_market_data() is None:
-            redis = get_redis()
-            session_raw = await redis.get(f"kotak:session:{user_id}")
-            if session_raw:
-                session_data = json.loads(session_raw)
-                init_market_data(
-                    access_token=credentials.get("apiKey", ""),
-                    base_url=session_data.get("base_url", ""),
-                )
-                log.info("worker.market_data_restored", user_id=user_id)
-            else:
-                raise KotakAuthError(
-                    "No kotak session found. complete TOTP -> MPIN login first."
-                )
-
-        # Build and run strategy
-        context = StrategyContext(
-            user_id=user_id,
-            user_email=user_email,
-            strategy_name=strategy_name,
-            auto_trading=auto_trading,
-            credentials=credentials,
+        strategy = get_strategy(
+            strategy_name,
+            StrategyContext(
+                user_id=user_id,
+                user_email=user_email,
+                strategy_name=strategy_name,
+                auto_trading=auto_trading,
+                credentials=credentials,
+                force=force,
+            )
         )
-        strategy = get_strategy(strategy_name, context)
 
-        snapshots = {}
-        for symbol in strategy.symbols():
-            snapshots[symbol] = await _fetch_live_snapshot(symbol)
+        if not force and not strategy.is_scheduled_to_run():
+            log.debug("strategy_job.not_scheduled", user_id=user_id, strategy=strategy_name)
+            return {"status": "hold", "reason": "Not scheduled to run at this time"}
+
+        if not settings.use_mock_broker:
+            await self._ensure_market_data(user_id, credentials)
+            bind_market_data_user(user_id)
 
         if is_any_breaker_open():
-            log.warning(
-                "strategy_job.circuit_open_skip",
-                user_id=user_id,
-                strategy=strategy_name,
-                note="Kotak API circuit open-holding strategy until recovery"
-            )
+            log.warning("strategy_job.circuit_open_skip", user_id=user_id, strategy_name=strategy_name)
             return {"status": "hold", "reason": "Kotak circuit open - waiting for recovery"}
 
         try:
+            snapshots = {}
+            for symbol in strategy.symbols():
+                snapshots[symbol] = await _fetch_live_snapshot(symbol)
             signals = await strategy.run(snapshots)
-        except CircuitBreakerError:
+        except (CircuitBreakerError, RuntimeError) as e:
             log.warning(
-                "strategy_job.circuit_tripped",
+                "strategy_job.market_data_unavailable",
                 user_id=user_id,
                 strategy=strategy_name,
-                note="Circuit breaker opened mid-execution — Kotak API went down",
+                error=str(e)
             )
-            return {"status": "hold", "reason": "Kotak circuit tripped during strategy run"}
+            return {"status": "hold", "reason": f"Market data unavailable: {e}"}
 
         actionable = [s for s in signals if s.is_actionable()]
 
@@ -164,74 +155,63 @@ class StrategyWorker:
 
         # Auto trading ON — execute
         try:
-            broker = await self._get_broker(user_id, credentials)
+            broker = await create_broker(user_id, credentials)
         except KotakAuthError as e:
             log.error("strategy_job.auth_failed", user_id=user_id, error=str(e))
             await self._notify_auth_required(user_id)
             raise  # re-raise so bullmq marks the job failed and retries
 
+        try:
+            result = await self._execute_signals(actionable, user_id, broker, credentials)
+        finally:
+            await broker.close()
+        return {"status": "executed", "result": result}
+
+    async def _execute_signals(self, actionable, user_id: str, broker, credentials: dict) -> list:
         results = []
         for signal in actionable:
             result = await self.order_manager.execute(
                 signal=signal, user_id=user_id,
-                broker=broker, credentials=credentials,
+                broker=broker, credentials=credentials
             )
             log.info("strategy_job.complete", result=result, user_id=user_id, strategy=signal.strategy_name)
             results.append(result)
-        return {"status": "executed", "result": results}
+            if result.get("stage") == "auth":
+                # Kotak rejected the session: every remaining order would fail the same way and each
+                # would leave another FAILED row behind. Stop, and tell the user to log in again.
+                await self._notify_auth_required(user_id)
+                break
+        return results
 
-    async def _handle_trade_job(self, job: Job, job_token: str) -> dict:
-        data: dict = job.data
-
-        user_id = data["userId"]
-        trade_id = data.get("tradeId")
-        encrypted_creds = data["encryptedCredentials"]
-
-        log.info("trade_job.start", job_id=job.id, user_id=user_id, trade_id=trade_id)
-
-        db = await get_db()
-        trade = await db.trades.find_one({"_id": ObjectId(trade_id)})
-
-        if not trade:
-            raise Exception(f"Trade {trade_id} not found in DB")
-
-        if trade["status"] != "PENDING":
-            log.info("trade_job.skip", trade_id=trade_id, status=trade["status"])
-            return {"status": "skipped", "reason": trade["status"]}
-
+    async def _current_auto_trading(self, user_id:str, fallback:bool) -> bool:
         try:
-            credentials = json.loads(decrypt(encrypted_creds))
-            broker = await self._get_broker(user_id, credentials)
+            db = await get_db()
+            user = await db.users.find_one({"_id": ObjectId(user_id)}, {"autoTrading": 1})
+            return bool(user.get("autoTrading", False)) if user else False
         except Exception as e:
-            log.error("trade_job.broker_error", error=str(e))
-            raise
+            log.warning("worker.auto_trading_lookup_failed", error=str(e))
+            return bool(fallback)
 
-        order_result = await broker.place_order(
-            symbol=trade["symbol"],
-            side=trade["side"],
-            qty=trade["qty"],
-            price=trade["price"],
-            order_type="MARKET",
-            product_type="MIS",
-            exchange=trade.get("exchange", "nse_fo"),
+    async def _ensure_market_data(self, user_id: str, credentials: dict) -> None:
+        """Every user gets their own quotes client, built from THEIR session. (It used to be a
+        single global client created from whichever user logged in first.)"""
+        if has_market_data(user_id):
+            return
+        session_raw = await get_redis().get(f"kotak:session:{user_id}")
+        if not session_raw:
+            raise KotakAuthError("No kotak session found. complete TOTP -> MPIN login first.")
+        session_data = json.loads(session_raw)
+        init_market_data(
+            access_token=credentials.get("apiKey", ""),
+            base_url=session_data.get("base_url", ""),
+            user_id=user_id,
         )
-
-        await db.trades.update_one(
-            {"_id": trade["_id"]},
-            {"$set": {"orderId": order_result.get("orderId"), "status": "PLACED"}},
-        )
-        log.info("trade_job.order_placed", trade_id=trade_id, order=order_result)
-        return {"status": "placed", "orderId": order_result.get("orderId")}
-
-    # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
+        log.info("worker.market_data_restored", user_id=user_id)
 
     async def _log_signal_to_db(self, signal, user_id: str) -> None:
-        from datetime import datetime, timezone
         db = await get_db()
         await db.signals.insert_one({
-            "user_id": ObjectId(user_id),
+            "userId": ObjectId(user_id),
             "strategyName": signal.strategy_name,
             "symbol": signal.symbol,
             "action": signal.action.value,
@@ -241,7 +221,7 @@ class StrategyWorker:
             "takeProfit": signal.take_profit,
             "metadata": signal.metadata,
             "autoTraded": False,
-            "createdAt": datetime.now(timezone.utc).isoformat(),
+            "createdAt": datetime.now(timezone.utc)
         })
         log.info("signal.saved_only", user_id=user_id, symbol=signal.symbol, action=signal.action)
 
@@ -253,14 +233,3 @@ class StrategyWorker:
             "Kotak session expired. Please re-authenticate via dashboard",
         )
 
-    async def _get_broker(self, user_id: str, credentials: dict) -> KotakNeoBroker:
-        broker = KotakNeoBroker(user_id=user_id)
-        authenticated = await broker.authenticate(credentials)
-
-        if not authenticated:
-            raise KotakAuthError(
-                "No active Kotak session. User must complete TOTP → MPIN login."
-            )
-
-        log.info("worker.using_kotak_broker", user_id=user_id)
-        return broker

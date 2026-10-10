@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from aiobreaker import CircuitBreakerError
 
+from src.broker.errors import KotakOrderUncertainError, KotakBusinessError, KotakAuthError, KotakAPIError, KotakRateLimitError
 from src.broker.base_broker import BaseBroker
 from src.utils.rate_limiter import kotak_limiter
 from src.utils.retry import retrying_orders, retrying_auth
@@ -34,6 +35,7 @@ _EXCHANGE_TO_SEGMENT = {
     "CDE_FO": "cde_fo",
 }
 
+
 def _to_kotak_segment(exchange: str) -> str:
     """Normalize any exchange spelling used elsewhere in the codebase into
     the exact lowercase segment code Kotak's API requires."""
@@ -46,6 +48,7 @@ def _to_kotak_segment(exchange: str) -> str:
         return mapped
     log.warning("kotak.unknown_exchange_segment", exchange=exchange)
     return exchange.lower()
+
 
 class KotakNeoSession:
     """
@@ -216,7 +219,6 @@ class KotakNeoBroker(BaseBroker):
             view_sid: str,
             access_token: str,
     ) -> KotakNeoSession:
-        from src.broker.circuit_breaker import kotak_auth_breaker
         """
         Step 2 of auth.
         mpin:        user's 6-digit MPIN
@@ -226,7 +228,9 @@ class KotakNeoBroker(BaseBroker):
 
         Returns KotakNeoSession with session_token, session_sid, base_url.
         """
+        from src.broker.circuit_breaker import kotak_auth_breaker
         await kotak_limiter.acquire_auth()
+
         async def _do_mpin_call():
             return await kotak_auth_breaker.call_async(
                 self._post_json,
@@ -240,6 +244,7 @@ class KotakNeoBroker(BaseBroker):
                     "Auth": view_token,
                 },
             )
+
         try:
             async for attempt in retrying_auth():
                 with attempt:
@@ -291,6 +296,7 @@ class KotakNeoBroker(BaseBroker):
             order_type: str,  # "MARKET" | "LIMIT" | "SL" | "SL-M"
             product_type: str,  # "MIS" | "NRML" | "CNC"
             exchange: str,  # "nse_cm" | "nse_fo" | "bse_cm" etc.
+            trigger_price: float = 0.0
     ) -> dict:
         """
         Place order via Kotak Neo API.
@@ -312,7 +318,7 @@ class KotakNeoBroker(BaseBroker):
             "pt": self._map_order_type(order_type),  # MKT / L / SL / SL-M
             "qt": str(qty),
             "rt": "DAY",
-            "tp": "0",  # trigger price
+            "tp": str(trigger_price) if trigger_price > 0 else "0",  # trigger price
             "ts": symbol,  # trading symbol
             "tt": "B" if side == "BUY" else "S",
         }
@@ -325,6 +331,7 @@ class KotakNeoBroker(BaseBroker):
             qty=qty,
             exchange=exchange,
         )
+
         await kotak_limiter.acquire_orders()
         try:
             resp = await kotak_orders_breaker.call_async(
@@ -340,10 +347,19 @@ class KotakNeoBroker(BaseBroker):
                 "Too many recent failures — wait 1 minute and try again."
             )
 
+        except httpx.ConnectError as e:
+            raise KotakAPIError(f"Couldn't connect to Kotak: {e}")
+
+        except httpx.TransportError as e:
+            raise KotakOrderUncertainError(
+                f"Order request to kotak did not complete ({type(e).__name__});"
+                "it may or may not have been placed - check the order book."
+            )
+
         # Success: { "nOrdNo": "...", "stat": "Ok", "stCode": 200 }
         order_id = resp.get("nOrdNo", "")
         if not order_id:
-            raise KotakAPIError(
+            raise KotakBusinessError(
                 resp.get("emsg") or "Order placed but no order number returned"
             )
 
@@ -366,16 +382,14 @@ class KotakNeoBroker(BaseBroker):
             "raw": resp,
         }
 
-    async def place_order_with_sl(
+    async def place_sl_order(
             self,
             symbol: str,
-            side: str,
+            position_side: str,
             qty: int,
-            price: float,
-            order_type: str,
+            trigger_price: float,
             product_type: str,
             exchange: str,
-            stop_loss: Optional[float] = None,
     ) -> dict:
         """
         Places main order + separate SL-M order (opposite side).
@@ -383,30 +397,20 @@ class KotakNeoBroker(BaseBroker):
         so we place two separate orders.
         """
         # Main order
-        result = await self.place_order(
-            symbol, side, qty, price, order_type, product_type, exchange
+
+        if trigger_price <= 0:
+            raise KotakBusinessError("Stop-loss trigger price must be > 0")
+        sl_side = "SELL" if position_side == "BUY" else "BUY"
+        return await self.place_order(
+            symbol=symbol,
+            side=sl_side,
+            qty=qty,
+            price=0.0,  # SL-M = market when triggered
+            order_type="SL-M",
+            product_type=product_type,
+            exchange=exchange,
+            trigger_price=trigger_price,
         )
-
-        # SL order — opposite side, SL-M type
-        if stop_loss and result.get("order_id"):
-            sl_side = "SELL" if side == "BUY" else "BUY"
-            try:
-                sl_result = await self.place_order(
-                    symbol=symbol,
-                    side=sl_side,
-                    qty=qty,
-                    price=0.0,  # SL-M = market when triggered
-                    order_type="SL-M",
-                    product_type=product_type,
-                    exchange=exchange,
-                )
-                result["sl_order_id"] = sl_result.get("order_id")
-                log.info("kotak.sl_order_placed", sl_order_id=sl_result.get("order_id"))
-            except Exception as e:
-                log.error("kotak.sl_order_failed", error=str(e))
-                result["sl_error"] = str(e)
-
-        return result
 
     async def modify_order(
             self,
@@ -469,27 +473,36 @@ class KotakNeoBroker(BaseBroker):
             log.error("kotak.cancel_failed", order_id=order_id, error=str(e))
             return False
 
+    _TERMINAL = {"complete", "filled", "traded", "rejected", "cancelled", "canceled", "cancel"}
+
     async def get_order_status(self, order_id: str) -> dict:
         """Fetch order history for a specific order number."""
         self._ensure_session()
 
-        j_data = {"nOrdNo": order_id}
-
         resp = await self._post_form(
             endpoint="/quick/order/history",
-            j_data=j_data,
+            j_data={"nOrdNo": order_id}
         )
 
-        data = resp.get("data", [])
-        latest = data[0] if data else {}
+        data = resp.get("data", []) or []
+        latest = next(
+            (e for e in data if str(e.get("ordSt", "")).lower().strip() in self._TERMINAL),
+            data[0] if data else {}
+        )
+
+        try:
+            avg_price = float(latest.get("avgPrc") or 0)
+        except (TypeError, ValueError):
+            avg_price = 0.0
 
         return {
             "order_id": order_id,
             "status": latest.get("ordSt", "UNKNOWN"),
             "symbol": latest.get("trdSym", ""),
             "qty": latest.get("qty", 0),
-            "avg_price": latest.get("avgPrc", "0"),
+            "avg_price": avg_price,
             "side": "BUY" if latest.get("trnsTp") == "B" else "SELL",
+            "rejection_reason": latest.get("rejRsn") or "",
             "raw": data,
         }
 
@@ -563,7 +576,7 @@ class KotakNeoBroker(BaseBroker):
         Uses access_token (not session_token) — no neo-fin-key, no Auth/Sid.
         """
         from src.broker.circuit_breaker import kotak_quotes_breaker
-
+        self._ensure_session()
         query_str = ",".join(queries)
         url = f"{self._session.base_url}/script-details/1.0/quotes/neosymbol/{query_str}/all"
 
@@ -673,11 +686,17 @@ class KotakNeoBroker(BaseBroker):
             )
 
         if resp.status_code == 429:
-            raise KotakRateLimitError("Rate limit — 10 req/sec max")
+            raise KotakRateLimitError("Rate limit exceeded (HTTP 429)", 429)
 
         if resp.status_code >= 500:
             raise KotakAPIError(
                 f"Kotak server error {resp.status_code}: {resp.text[:200]}",
+                resp.status_code,
+            )
+
+        if 400 <= resp.status_code < 500:
+            raise KotakBusinessError(
+                f"Kotak rejected the request ({resp.status_code}): {resp.text[:200]}",
                 resp.status_code,
             )
 
@@ -689,14 +708,14 @@ class KotakNeoBroker(BaseBroker):
         if isinstance(data, dict):
             stat = data.get("stat", "")
             if stat == "Not_Ok":
-                raise KotakAPIError(
+                raise KotakBusinessError(
                     data.get("errMsg") or data.get("emsg") or data.get("message") or "Kotak API error",
-                    data.get("stCode", 0),
+                    data.get("stCode", 0) if isinstance(data.get("stCode", 0), int) else 0,
                 )
 
         return data
 
-    async def _retry(self, fn, retries: int = MAX_RETRIES) -> dict:
+    async def _retry(self, fn) -> dict:
         async for attempt in retrying_orders():
             with attempt:
                 return await fn()
@@ -729,17 +748,3 @@ class KotakNeoBroker(BaseBroker):
         await self._client.aclose()
 
 
-# ── Exceptions ──────────────────────────────────────────────────────────────
-
-class KotakAPIError(Exception):
-    def __init__(self, message: str, status_code: int = 0):
-        super().__init__(message)
-        self.status_code = status_code
-
-
-class KotakAuthError(KotakAPIError):
-    pass
-
-
-class KotakRateLimitError(KotakAPIError):
-    pass

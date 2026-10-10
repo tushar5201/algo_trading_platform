@@ -1,50 +1,88 @@
-import { KillSwitch } from "../models/KillSwitch";
-import { User } from "../models/User";
-import { publishStrategyRunForAllUsers } from "../services/queue.service";
+import {KillSwitch} from "../models/KillSwitch";
+import {User} from "../models/User";
+import {publishStrategyRunForAllUsers} from "../services/queue.service";
+import {clearInterval} from "node:timers";
+import {Strategy} from "../models/Strategy";
 
-const INTERVAL_MS = 1 * 60 * 1000; // 5 minutes
+const INTERVAL_MS = 60 * 1000; // 1 minutes
 
-export const startScheduler = async (): Promise<void> => {
-    console.log(`[Scheduler] Starting Node Scheduler with interval of ${INTERVAL_MS / 60000} minutes`);
-    const run = async (): Promise<void> => {
-        try {
-            const globalKill = await KillSwitch.findOne({ scope: 'global', isActive: true });
-            if (globalKill) {
-                console.log(`[Scheduler] Global kill switch is active. Skipping this run.`);
-                return;
-            }
+let timer: NodeJS.Timeout | null = null;
+let running = false;
+let stopped = false;
 
-            // Find all elegible users 
-            const users = await User.find({
-                status: 'APPROVED',
-                autoTrading: true,
-                isActive: true,
-                encryptedCredentials: { $ne: null },
-                assignedStrategies: { $not: { $size: 0 } },
-            }).select('_id email assignedStrategies encryptedCredentials autoTrading');
+const run = async (): Promise<void> => {
+    if (running) return;
+    running = true;
+    try {
+        const globalKill = await KillSwitch.findOne({scope: 'global', isActive: true});
+        if (globalKill) {
+            console.log(`[Scheduler] Global kill switch is active. Skipping this run.`);
+            return;
+        }
 
-            if (users.length === 0) {
-                console.log(`[Scheduler] No eligible users found for strategy run.`);
-                return;
-            }
+        // Find all elegible users
+        const users = await User.find({
+            status: 'APPROVED',
+            autoTrading: true,
+            isActive: true,
+            encryptedCredentials: {$ne: null},
+            assignedStrategies: {$not: {$size: 0}},
+        }).select('_id email assignedStrategies +encryptedCredentials autoTrading');
 
-            // Flatten: one job per user per strategy
-            const jobs = users.flatMap(user =>
-                user.assignedStrategies.map(strategyName => ({
-                    userId: user._id.toString(),
-                    userEmail: user.email,
-                    strategyName,
-                    encryptedCredentials: user.encryptedCredentials!,
-                    autoTrading: user.autoTrading,
-                }))
+        if (users.length === 0) {
+            console.log(`[Scheduler] No eligible users found for strategy run.`);
+            return;
+        }
+
+        const [userKills, activeStrategies] = await Promise.all([
+            KillSwitch.find({scope: 'user', isActive: true}).select('userId'),
+            Strategy.find({isActive: true}).select('name'),
+        ]);
+
+        const killedUsers = new Set(userKills.map(k => k.userId?.toString()));
+        const activeNames = new Set(activeStrategies.map(strategy => strategy.name));
+
+        // Flatten: one job per user per strategy
+        const jobs = users
+            .filter(user => !killedUsers.has(user._id.toString()))
+            .flatMap(user =>
+                user.assignedStrategies
+                    .filter(strategyName => activeNames.has(strategyName))
+                    .map(strategyName => ({
+                        userId: user._id.toString(),
+                        userEmail: user.email,
+                        strategyName,
+                        encryptedCredentials: user.encryptedCredentials!,
+                        autoTrading: user.autoTrading,
+                    }))
             );
 
-            await publishStrategyRunForAllUsers(jobs, 'NODE_SCHEDULER');
-            console.log(`[Scheduler] Queued ${jobs.length} strategy jobs for ${users.length} users`);
-        } catch (error) {
-            console.error('[Scheduler] Error in scheduler run:', error);
+        if (jobs.length === 0) {
+            console.log(`[Scheduler] No runnable jobs after kill-switch / active-strategy filtering.`);
+            return;
         }
+
+        await publishStrategyRunForAllUsers(jobs, 'NODE_SCHEDULER');
+        console.log(`[Scheduler] Queued ${jobs.length} strategy jobs for ${users.length} users`);
+    } catch (error) {
+        console.error('[Scheduler] Error in scheduler run:', error);
+    } finally {
+        running = false;
     }
-    await run();
-    setInterval(run, INTERVAL_MS);
 }
+
+export const startScheduler = async (): Promise<void> => {
+    stopped = false;
+    console.log(`[Scheduler] Starting Node Scheduler with interval of ${INTERVAL_MS / 60000} minutes`);
+    await run();
+    if (stopped) return;
+    timer = setInterval(() => void run(), INTERVAL_MS);
+};
+
+export const stopScheduler = (): void => {
+    stopped = true;
+    if (timer) {
+        clearInterval(timer);
+        timer = null;
+    }
+};

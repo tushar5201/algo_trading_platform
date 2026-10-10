@@ -16,12 +16,13 @@ async def connect_redis() -> None:
     )
     await _redis.ping()
     kotak_limiter.init(_redis)
-    log.info("Connected to Redis", host=settings.redis_host)
+    log.info("redis.connected", host=settings.redis_host)
 
 async def disconnect_redis() -> None:
     global _redis
     if _redis:
         await _redis.aclose()
+        _redis = None
 
 def get_redis() -> aioredis.Redis:
     if _redis is None:

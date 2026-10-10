@@ -4,17 +4,20 @@ import { AppError } from "../middleware/errorhandler";
 import { comparePassword, hashPassword, signToken } from "../services/auth.service";
 import { User } from "../models/User";
 import { writeAuditLog } from "../services/audit.service";
+import bcrypt from "bcryptjs";
 
 const signupSchema = z.object({
-    name: z.string().min(2, 'Name must be at least 2 characters long').max(50, 'Name must be less than 50 characters long'),
-    email: z.string().email(),
-    password: z.string().min(8, 'Password must be at least 8 characters long'),
+    name: z.string().trim().min(2, 'Name must be at least 2 characters long').max(50, 'Name must be less than 50 characters long'),
+    email: z.string().trim().email(),
+    password: z.string().min(8, 'Password must be at least 8 characters long').max(72, 'Password must be at most 72 characters long'),
 });
 
 const loginSchema = z.object({
-    email: z.string().email(),
-    password: z.string().min(1),
+    email: z.string().trim().email(),
+    password: z.string().min(1).max(72),
 });
+
+const DUMMY_HASH = bcrypt.hashSync("not-a-real-password", 12);
 
 export const signup = async (req: Request, res: Response): Promise<void> => {
     const parsed = signupSchema.safeParse(req.body);
@@ -46,14 +49,13 @@ export const login = async (req: Request, res: Response): Promise<void> => {
     const { email, password } = parsed.data;
 
     const user = await User.findOne({ email }).select("+passwordHash");
-    if (!user) throw new AppError(401, "Invalid email or password");
+    const valid = await comparePassword(password, user?.passwordHash ?? DUMMY_HASH);
+
+    if (!user || !valid) throw new AppError(401, "Invalid email or password");
 
     if (user.status === "PENDING") throw new AppError(403, `Your account is pending admin approval.`);
     if (user.status === "REJECTED") throw new AppError(403, `Your account has been rejected.`);
     if (!user.isActive) throw new AppError(403, `Your account is inactive.`);
-
-    const valid = await comparePassword(password, user.passwordHash);
-    if (!valid) throw new AppError(401, "Invalid Credentials");
 
     const token = signToken(user);
     await writeAuditLog(user._id.toString(), user.role, 'USER_LOGIN', undefined, { email });
@@ -66,6 +68,7 @@ export const login = async (req: Request, res: Response): Promise<void> => {
                 name: user.name,
                 email: user.email,
                 role: user.role,
+                status: user.status,
                 assignedStrategies: user.assignedStrategies,
                 autoTrading: user.autoTrading
             }

@@ -5,7 +5,7 @@ import { api } from '../../api/client';
 import clsx from 'clsx';
 import type {Trade} from "../../types";
 
-const STATUS_OPTIONS = ['ALL', 'EXECUTED', 'PENDING', 'FAILED', 'CLOSED'];
+const STATUS_OPTIONS = ['ALL', 'EXECUTED', 'PENDING', 'EXIT_PENDING', 'CLOSED', 'FAILED', 'CANCELED', 'NEEDS_REVIEW'];
 
 export default function TradesPage() {
     const [status, setStatus] = useState('ALL');
@@ -129,17 +129,19 @@ export default function TradesPage() {
                                     </td>
                                     <td className="px-4 py-3">
                       <span className={{
-                          EXECUTED:  'badge-green',
-                          PENDING:   'badge-yellow',
-                          FAILED:    'badge-red',
-                          CANCELLED: 'badge-red',
-                          CLOSED:    'badge-blue',
+                          EXECUTED:     'badge-green',
+                          PENDING:      'badge-yellow',
+                          EXIT_PENDING: 'badge-yellow',
+                          FAILED:       'badge-red',
+                          CANCELED:     'badge-red',
+                          NEEDS_REVIEW: 'badge-red',
+                          CLOSED:       'badge-blue',
                       }[trade.status] ?? 'badge-yellow'}>
                         {trade.status}
                       </span>
                                     </td>
                                     <td className="px-4 py-3 font-medium whitespace-nowrap">
-                                        {trade.pnl !== null ? (
+                                        {trade.pnl != null ? (
                                             <span className={trade.pnl >= 0
                                                 ? 'text-emerald-600 dark:text-emerald-400'
                                                 : 'text-red-600 dark:text-red-400'}>

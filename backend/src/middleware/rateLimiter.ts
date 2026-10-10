@@ -20,18 +20,18 @@ class RedisStore {
         const windowsSecs = Math.ceil(this.windowMs / 1000);
         const hits = await redis.incr(redisKey);
 
-        if (hits == 1) {
+        let ttl = await redis.ttl(redisKey);
+        if (hits == 1 || ttl < 0) {
             await redis.expire(redisKey, windowsSecs);
+            ttl = windowsSecs;
         }
 
-        const ttl = await redis.ttl(redisKey);
         const resetTime = new Date(Date.now() + ttl * 1000);
         return {totalHits: hits, resetTime};
     }
 
     async decrement(key: string): Promise<void> {
-        const redisKey = this.key(key);
-        await redis.decr(redisKey);
+        await redis.decr(this.key(key));
     }
 
     async resetKey(key: string): Promise<void> {
@@ -41,6 +41,7 @@ class RedisStore {
 
 function tooManyRequestHandler(req: express.Request, res: express.Response, _next: any, options: Options): void {
     const retryAfter = Math.ceil((options.windowMs ?? 60000) / 1000);
+    res.setHeader('Retry-After', String(retryAfter));
     res.status(429).json({
         success: false,
         error: "TOO_MANY_REQUESTS",
@@ -56,6 +57,7 @@ function makeLimiter(opts: {
     max: number;
     message: string;
     keyFn?: (req: express.Request) => string;
+    skipSuccessfulRequestHandler?: boolean;
 }): RateLimitRequestHandler {
     const store = new RedisStore(opts.prefix, opts.windowMs);
 
@@ -65,41 +67,46 @@ function makeLimiter(opts: {
         message: opts.message,
         standardHeaders: "draft-7", // Rateimit-Policy header
         legacyHeaders: false,
-        store,
+        store: store as any,
         keyGenerator: opts.keyFn ?? ((req) => req.ip ?? "unknown"),
         handler: tooManyRequestHandler,
         skip: (req) => req.method === "OPTIONS",
+        skipSuccessfulRequests: opts.skipSuccessfulRequestHandler ?? false,
+        passOnStoreError: true
     });
 }
+
+const byUserOrIp = (req: express.Request): string => req.user?.userId ?? req.ip ?? "unknown";
 
 export const authLimiter = makeLimiter({
     prefix: "auth",
     windowMs: 15 * 60 * 1000,
-    max: 5,
+    max: 10,
+    skipSuccessfulRequestHandler: true,
     message: "Too many login attempts from this IP. Please wait 15 mins before trying again."
 });
 
 export const apiLimiter = makeLimiter({
-    windowMs: 60 * 60 * 1000, // 1 hour
-    max: 100,
-    message: "Too many requests, please try again after an 15 mins",
-    prefix: "api"
+    prefix: "api",
+    windowMs: 15 * 60 * 1000, // 1 hour
+    max: 1000,
+    message: "Too many requests, please try again after an 15 mins"
 });
 
 export const tradeLimiter = makeLimiter({
     prefix: "trades",
     windowMs: 60 * 1000,
-    max: 60,
+    max: 120,
     message: "Too many trade history requests. The dashboard refreshes automatically — no need to refresh manually.",
-    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
+    keyFn: byUserOrIp
 });
 
 export const kotakAuthLimiter = makeLimiter({
     prefix: "kotak_auth",
     windowMs: 5 * 60 * 1000,
-    max: 3,
+    max: 5,
     message: "Too many Kotak authentication attempts. Kotak may lock your account after repeated failures. Please wait 5 minutes",
-    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
+    keyFn: byUserOrIp
 });
 
 export const triggerLimiter = makeLimiter({
@@ -107,7 +114,7 @@ export const triggerLimiter = makeLimiter({
     windowMs: 60 * 1000,
     max: 5,
     message: "Too many manual strategy triggers attempts",
-    keyFn: (req) => (req as any).user?.userId ?? req.ip ?? "unknown"
+    keyFn: byUserOrIp
 });
 
 export const killSwitchLimiter = makeLimiter({
@@ -115,4 +122,5 @@ export const killSwitchLimiter = makeLimiter({
     windowMs: 60 * 1000,
     max: 10,
     message: "Too many kills attempts. wait 60 secs",
+    keyFn: byUserOrIp
 });

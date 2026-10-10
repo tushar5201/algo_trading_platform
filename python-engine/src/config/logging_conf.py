@@ -14,6 +14,7 @@ def setup_logging():
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
+            structlog.processors.format_exc_info,
             structlog.dev.ConsoleRenderer()
             if settings.node_env == "development"
             else structlog.processors.JSONRenderer(),
@@ -25,4 +26,4 @@ def setup_logging():
 
     # Silence noisy library
     logging.getLogger("motor").setLevel(logging.WARNING)
-    logging.getLogger("pymongo  ").setLevel(logging.WARNING)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)

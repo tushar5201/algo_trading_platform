@@ -14,25 +14,7 @@ export interface StrategyRunJob {
     timestamp: string; 
 } 
 
-// Trade Executor job
-// Published by: Python strategy engine when a trade signal is generated
-// Consumed by: Python trade executor
 
-export interface TradeExecutionJob {
-    jobType: 'TRADE_EXECUTION';
-    userId: string;
-    strategyName: string;
-    symbol: string; 
-    side: 'BUY' | 'SELL';
-    qty: number;
-    price: number;
-    orderType: 'MARKET' | 'LIMIT';
-    productType: 'MIS' | 'NORMAL';
-    exchange: 'NSE' | 'BSE' | 'NFO';
-    encryptedCredentials: string;
-    tradeId: string; 
-    timestamp: string;
-}
 
 // Notification Job
 // Future use: email/SMS alert
@@ -45,4 +27,4 @@ export interface NotificationJob {
     timestamp: string;
 }
 
-export type AnyJob = StrategyRunJob | TradeExecutionJob | NotificationJob;
+export type AnyJob = StrategyRunJob | NotificationJob;

@@ -20,10 +20,24 @@ class BaseBroker(ABC):
             price: float,
             order_type: str,
             product_type: str,
-            exchange: str
+            exchange: str,
+            trigger_price: float = 0.0,
     ) -> dict:
         # place order
         ...
+
+    @abstractmethod
+    async def place_sl_order(
+            self,
+            symbol: str,
+            position_side: str,
+            qty: int,
+            trigger_price: float,
+            product_type: str,
+            exchange: str,
+        ) -> dict:
+            # protective stop on the opposite side of an OPEN position
+            ...
 
     @abstractmethod
     async def get_order_status(self, order_id: str) -> dict:
@@ -34,3 +48,7 @@ class BaseBroker(ABC):
     async def cancel_order(self, order_id: str) -> None:
         # Cancel a pending order
         ...
+
+    async def close(self) -> None:
+        """Release network resources. Safe to call more than once."""
+        return None

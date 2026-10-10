@@ -11,6 +11,7 @@ import {
     toggleAutoTrading,
     getCredentials
 } from "../controllers/user.controller";
+import {kotakAuthLimiter} from "../middleware/rateLimiter";
 
 const router = Router();
 router.use(authenticate, requireRole('user'));
@@ -20,8 +21,8 @@ router.patch('/toggle-trading', asynchandler(toggleAutoTrading));
 router.get('/strategies', asynchandler(getMyStrategies));
 router.get('/credentials', asynchandler(getCredentials));
 
-router.post('/kotak/totp', asynchandler(submitTOTP));
-router.post('/kotak/mpin', asynchandler(submitMPIN));
+router.post('/kotak/totp', kotakAuthLimiter, asynchandler(submitTOTP));
+router.post('/kotak/mpin', kotakAuthLimiter, asynchandler(submitMPIN));
 router.get('/kotak/auth-status', asynchandler(getAuthStatus));
 
 export default router;

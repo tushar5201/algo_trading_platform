@@ -1,31 +1,19 @@
-import { strategyQueue, tradeQueue } from "../queues";
-import { StrategyRunJob, TradeExecutionJob } from "../queues/jobTypes";
+import {strategyQueue} from "../queues";
+import {StrategyRunJob} from "../queues/jobTypes";
+
+const minuteBucket = (): number => Math.floor(Date.now() / 60000);
 
 // Publish: Run a strategy for a user
 export const publishStrategyRun = async (payload: Omit<StrategyRunJob, 'jobType' | 'timestamp'>): Promise<string> => {
     const job = await strategyQueue.add(`strategy: ${payload.strategyName}:${payload.userId}`, {
-        ...payload,
-        jobType: 'STRATEGY_RUN',
-        timestamp: new Date().toISOString(),
-    } satisfies StrategyRunJob,
+            ...payload,
+            jobType: 'STRATEGY_RUN',
+            timestamp: new Date().toISOString(),
+        } satisfies StrategyRunJob,
         {
-            jobId: `${payload.userId}-${payload.strategyName}-${Math.floor(Date.now() / 60000)}`,
+            jobId: `manual-${payload.userId}-${payload.strategyName}-${Date.now()}`,
         });
     console.log(`[Queue] Published strategy run job with ID: ${job.id} for user: ${payload.userId}`);
-    return job.id!;
-}
-
-// Publish: execute a trade
-export const publishTradeExecution = async (payload: Omit<TradeExecutionJob, 'jobType' | 'timestamp'>): Promise<string> => {
-    const job = await tradeQueue.add(`trade: ${payload.strategyName}:${payload.userId}`, {
-        ...payload,
-        jobType: 'TRADE_EXECUTION',
-        timestamp: new Date().toISOString(),
-    } satisfies TradeExecutionJob,
-        {
-            priority: 1, // Higher priority for trade execution jobs
-        });
-    console.log(`[Queue] Published trade execution job with ID: ${job.id} for user: ${payload.userId}`);
     return job.id!;
 }
 
@@ -41,6 +29,7 @@ export const publishStrategyRunForAllUsers = async (
     }>,
     triggeredBy: StrategyRunJob['triggeredBy'] = 'NODE_SCHEDULER'
 ): Promise<void> => {
+    const bucket = minuteBucket();
     const jobs = users.map(user => ({
         name: `strategy: ${user.strategyName}:${user.userId}`,
         data: {
@@ -50,7 +39,7 @@ export const publishStrategyRunForAllUsers = async (
             triggeredBy,
         } satisfies StrategyRunJob,
         opts: {
-            jobId: `${user.userId}-${user.strategyName}-${Math.floor(Date.now() / 60000)}`,
+            jobId: `${user.userId}-${user.strategyName}-${bucket}`,
         }
     }));
     await strategyQueue.addBulk(jobs);

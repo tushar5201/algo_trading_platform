@@ -3,34 +3,32 @@ from datetime import timedelta
 import structlog
 from aiobreaker import CircuitBreaker, CircuitBreakerListener, CircuitBreakerState, CircuitBreakerError
 
-from src.broker.kotak_neo import KotakAuthError, KotakAPIError, KotakRateLimitError
+from src.broker.errors import KotakAuthError, KotakBusinessError, KotakRateLimitError
 
 log = structlog.get_logger()
 
+_NOT_OUTAGE = [KotakAuthError, KotakBusinessError, KotakRateLimitError]
 
 class LoggingListener(CircuitBreakerListener):
-    def state_change(self, breaker: CircuitBreaker, old: str, new: str) -> None:
-        old_name = old.name if hasattr(old, "name") else str(old)
-        new_name = new.name if hasattr(new, "name") else str(new)
-
+    def state_change(self, breaker: CircuitBreaker, old, new) -> None:
         if new == CircuitBreakerState.OPEN:
             log.error(
                 "circuit_breaker.open",
                 breaker=breaker.name,
                 fail_count=breaker.fail_counter,
-                reason=f"Too many failures, circuit opened for 60 seconds {breaker.name}"
+                reason=f"Too many failures, circuit opened for 60 seconds {breaker.timeout_duration}"
             )
         elif new == CircuitBreakerState.HALF_OPEN:
             log.warning(
                 "circuit_breaker.half_open",
                 breaker=breaker.name,
-                reason=f"Circuit is half-open, testing if the service has recovered {breaker.name}"
+                reason=f"Circuit is half-open, testing if the service has recovered"
             )
         elif new == CircuitBreakerState.CLOSED:
             log.info(
                 "circuit_breaker.closed",
                 breaker=breaker.name,
-                reason=f"Circuit closed, service has recovered {breaker.name}"
+                reason=f"Circuit closed, service has recovered"
             )
 
     def failure(self, breaker: CircuitBreaker, error: BaseException) -> None:
@@ -53,58 +51,29 @@ class LoggingListener(CircuitBreakerListener):
 
 _listener = LoggingListener()
 
-
-def _is_circuit_failure(exception: BaseException) -> bool:
-    import httpx
-    try:
-        if isinstance(exception, KotakAuthError):
-            return False
-        if isinstance(exception, KotakRateLimitError):
-            return True
-        if isinstance(exception, KotakAPIError):
-            return exception.status_code >= 500 or exception.status_code == 0
-    except ImportError:
-        pass
-
-    if isinstance(exception, httpx.TimeoutException):
-        return True
-    if isinstance(exception, httpx.ConnectError):
-        return True
-    if isinstance(exception, httpx.HTTPStatusError):
-        return exception.response.status_code >= 500
-
-    return True
-
-
-def _exclude_list():
-    import httpx
-    try:
-        return [KotakRateLimitError]
-    except ImportError:
-        return []
-
-
 kotak_quotes_breaker = CircuitBreaker(
     fail_max=3,
     timeout_duration=timedelta(seconds=60),
+    exclude=_NOT_OUTAGE,
     name="kotak_quotes",
-    listeners=[_listener],
-)
-
-kotak_orders_breaker = CircuitBreaker(
-    fail_max=3,
-    timeout_duration=timedelta(seconds=60),
-    name="kotak_orders",
     listeners=[_listener],
 )
 
 kotak_auth_breaker = CircuitBreaker(
     fail_max=5,
     timeout_duration=timedelta(seconds=120),
+    exclude=_NOT_OUTAGE,
     name="kotak_auth",
     listeners=[_listener],
 )
 
+kotak_orders_breaker = CircuitBreaker(
+    fail_max=3,
+    timeout_duration=timedelta(seconds=60),
+    exclude=_NOT_OUTAGE,
+    name="kotak_orders",
+    listeners=[_listener],
+)
 
 def get_all_breaker_states() -> dict:
     def _describe(breaker: CircuitBreaker) -> dict:
@@ -117,13 +86,8 @@ def get_all_breaker_states() -> dict:
             "fail_max": breaker.fail_max,
         }
 
-        if state == CircuitBreakerState.OPEN and breaker.opens_at:
-            info["opens_at"] = breaker.opens_at.isoformat()
-            info["seconds_until_retry"] = max(
-                0,
-                int(breaker.time_until_open.total_seconds())
-                if breaker.time_until_open else 0
-            )
+        if state == CircuitBreakerState.OPEN:
+            info["timeout_seconds"] = int(breaker.timeout_duration.total_seconds())
         return info
 
     return {
@@ -136,9 +100,11 @@ def get_all_breaker_states() -> dict:
 def is_any_breaker_open() -> bool:
     return any(
         b.current_state == CircuitBreakerState.OPEN
-        for b in [kotak_quotes_breaker, kotak_orders_breaker, kotak_auth_breaker]
+        for b in (kotak_quotes_breaker, kotak_orders_breaker, kotak_auth_breaker)
     )
 
+def is_breaker_open(breaker: CircuitBreaker) -> bool:
+    return breaker.current_state == CircuitBreakerState.OPEN
 
 __all__ = [
     "kotak_quotes_breaker",
@@ -147,4 +113,5 @@ __all__ = [
     "CircuitBreakerError",
     "get_all_breaker_states",
     "is_any_breaker_open",
+    "is_breaker_open",
 ]

@@ -6,8 +6,8 @@ import express from "express";
 
 const router = express.Router();
 
-router.post('/signup', asynchandler(signup));
-router.post('/login', asynchandler(login));
+router.post('/signup', authLimiter, asynchandler(signup));
+router.post('/login', authLimiter, asynchandler(login));
 router.get('/me', authenticate, asynchandler(getMe));
 
 export default router;
