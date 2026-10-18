@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 
 from aiobreaker import CircuitBreakerError
 
+from src.broker.errors import KotakIPNotAllowedError
 from src.broker.errors import KotakOrderUncertainError, KotakBusinessError, KotakAuthError, KotakAPIError, KotakRateLimitError
 from src.broker.base_broker import BaseBroker
 from src.utils.rate_limiter import kotak_limiter
@@ -34,6 +35,25 @@ _EXCHANGE_TO_SEGMENT = {
     "CDE": "cde_fo",
     "CDE_FO": "cde_fo",
 }
+
+IP_BLOCK_CODES = {100008, 1037}
+
+def _ip_block_error(body: object) -> Optional[KotakIPNotAllowedError]:
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except ValueError:
+            return None
+    if not isinstance(body, dict) or body.get("stCode") not in IP_BLOCK_CODES:
+        return None
+    code = body["stCode"]
+    why = ("this server's IP is not whitelisted" if code == 100008
+           else "the session was created from a different IP than the one placing orders")
+    return KotakIPNotAllowedError(
+        f"Kotak rejected the order (code {code}): {why}. Since 1 Apr 2026 order APIs only accept requests "
+        "from a whitelisted static IP with a session created from that same IP. Whitelist this server's IPv4 "
+        "in Kotak Neo > More > Trade API, then log in again from this machine.", 401 if code == 100008 else 0)
+
 
 
 def _to_kotak_segment(exchange: str) -> str:
@@ -674,6 +694,10 @@ class KotakNeoBroker(BaseBroker):
         log.debug("kotak.response", status=resp.status_code, url=str(resp.url))
 
         if resp.status_code == 401:
+            blocked = _ip_block_error(resp.text)
+            if blocked:
+                log.warning("kotak.order_ip_blocked", body=resp.text[:500], url=str(resp.url))
+                raise blocked
             self._session = None
             log.warning("kotak.401_body", body=resp.text[:500], url=str(resp.url))
             raise KotakAuthError("Session expired - re-authenticate")
@@ -695,6 +719,9 @@ class KotakNeoBroker(BaseBroker):
             )
 
         if 400 <= resp.status_code < 500:
+            blocked = _ip_block_error(resp.text)
+            if blocked:
+                raise blocked
             raise KotakBusinessError(
                 f"Kotak rejected the request ({resp.status_code}): {resp.text[:200]}",
                 resp.status_code,
@@ -708,6 +735,9 @@ class KotakNeoBroker(BaseBroker):
         if isinstance(data, dict):
             stat = data.get("stat", "")
             if stat == "Not_Ok":
+                blocked = _ip_block_error(data)
+                if blocked:
+                    raise blocked
                 raise KotakBusinessError(
                     data.get("errMsg") or data.get("emsg") or data.get("message") or "Kotak API error",
                     data.get("stCode", 0) if isinstance(data.get("stCode", 0), int) else 0,

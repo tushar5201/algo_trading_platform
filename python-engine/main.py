@@ -3,6 +3,7 @@ import signal as sys_signal
 import structlog
 from aiohttp import web
 
+from src.ai.jobs import AIWorker
 from src.config.logging_conf import setup_logging
 from src.config.settings import settings
 from src.db.mongo import connect_db, disconnect_db
@@ -23,7 +24,7 @@ async def health_handler(request: web.Request) -> web.Response:
 
 
 async def start_health_server() -> web.AppRunner:
-    app    = web.Application()
+    app = web.Application()
     app.router.add_get("/health", health_handler)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -40,8 +41,9 @@ async def main() -> None:
     await connect_redis()
 
     session_manager = SessionManager()
-    worker          = StrategyWorker()
-    sl_tp_monitor   = SLTPMonitor()
+    worker = StrategyWorker()
+    sl_tp_monitor = SLTPMonitor()
+    ai_worker = AIWorker()
 
     # Restore any existing Kotak session from Redis and kick off scrip master load
     await session_manager.restore_sessions()
@@ -73,9 +75,10 @@ async def main() -> None:
         asyncio.create_task(worker.stop())
         session_manager.stop()
         sl_tp_monitor.stop()
+        ai_worker.stop()
 
     loop.add_signal_handler(sys_signal.SIGTERM, shutdown)
-    loop.add_signal_handler(sys_signal.SIGINT,  shutdown)
+    loop.add_signal_handler(sys_signal.SIGINT, shutdown)
 
     health_runner = await start_health_server()
 
@@ -85,6 +88,7 @@ async def main() -> None:
             worker.start(),
             session_manager.start(),
             sl_tp_monitor.start(),
+            ai_worker.start(),
         )
     finally:
         await health_runner.cleanup()

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from datetime import datetime, timezone, timedelta
 
+from src.ai.jobs import enqueue_review
 from src.broker.base_broker import BaseBroker
 from src.broker.errors import KotakAuthError, KotakOrderUncertainError
 from src.broker.factory import load_user_credentials, create_broker
@@ -21,9 +22,7 @@ MAX_EXIT_ATTEMPTS = 3
 WARN_EVERY_SEC = 600  # repeat the same warning for the same user at most every 10 minutes
 EXIT_PENDING_STALE_AFTER = timedelta(minutes=5)
 
-
 def evaluate_exit(side: str, ltp: float, stop_loss: Optional[float], take_profit: Optional[float]) -> Optional[str]:
-    """Pure decision: 'STOP_LOSS', 'TAKE_PROFIT' or None. Works for long (BUY) and short (SELL)."""
     if not ltp or ltp <= 0:
         return None
     if side == "BUY":
@@ -38,16 +37,11 @@ def evaluate_exit(side: str, ltp: float, stop_loss: Optional[float], take_profit
             return "TAKE_PROFIT"
     return None
 
-
 def realised_pnl(side: str, entry_price: float, exit_price: float, qty: int) -> float:
     direction = 1 if side == "BUY" else -1
     return round((exit_price - entry_price) * qty * direction, 2)
 
-
 def is_stale_intraday(trade: dict, now: Optional[datetime] = None) -> bool:
-    """An MIS position is squared off by the broker at end of day. If our record is still open
-    on a LATER day (or after the close), it no longer exists at the broker: sending an exit
-    order now would open a naked position in the opposite direction."""
     if trade.get("productType") != "MIS":
         return False
     now = (now or datetime.now(IST)).astimezone(IST)
@@ -63,27 +57,12 @@ def is_stale_intraday(trade: dict, now: Optional[datetime] = None) -> bool:
 
 
 class SLTPMonitor:
-    """
-    Background task that monitors all open (EXECUTED) trades
-    that have a stopLoss or takeProfit set.
-
-    Every MONITOR_INTERVAL_SEC it:
-      1. Fetches all eligible open trades from MongoDB
-      2. Gets current LTP for each symbol
-      3. If SL or TP is breached → places exit order
-      4. Updates trade to CLOSED with final PnL
-
-    Uses MockBroker in development, KotakNeoBroker in production.
-    """
-
     def __init__(self):
         self.running = True
         self._stop_event = asyncio.Event()
         self._last_warned: dict[str, float] = {}
 
     def _should_warn(self, key: str, now: float | None = None) -> bool:
-        """Throttle repeated warnings: this loop runs every 10 s, so a user without a session
-        used to produce a log line every 10 s forever."""
         import time
         now = time.monotonic() if now is None else now
         if now - self._last_warned.get(key, -1e12) >= WARN_EVERY_SEC:
@@ -292,6 +271,10 @@ class SLTPMonitor:
             "entry": entry, "exit": exit_price, "pnl": pnl,
         })
         log.info("sl_tp_monitor.closed", trade_id=str(trade["_id"]), reason=reason, pnl=pnl)
+        try:
+            await enqueue_review("trade", str(trade["_id"]))
+        except Exception as e:
+            log.warning("ai.enqueue_skipped", trade_id=str(trade["_id"]), error=str(e))
 
     async def _close_without_order(self, db, trade: dict, reason: str) -> None:
         """Position no longer exists at the broker. P&L is unknown, so it is left null

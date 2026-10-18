@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo
 
 import structlog
 
-from config.settings import settings
+from src.config.settings import settings
 from src.db.mongo import get_db
 from src.execution.signal import Signal
 from bson import ObjectId

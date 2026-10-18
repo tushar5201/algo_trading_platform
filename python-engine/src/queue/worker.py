@@ -20,6 +20,7 @@ from src.utils.crypto import decrypt
 from src.utils.market_data import init_market_data, _fetch_live_snapshot
 from src.config.settings import settings
 from src.utils.market_data import has_market_data, bind_market_data_user
+from src.ai.jobs import enqueue_review
 
 log = structlog.get_logger()
 
@@ -181,6 +182,9 @@ class StrategyWorker:
                 # would leave another FAILED row behind. Stop, and tell the user to log in again.
                 await self._notify_auth_required(user_id)
                 break
+            if result.get("stage") == "ip_blocked":
+                log.error("strategy_job.ip_blocked", user_id=user_id, reason=result.get("reason"))
+                break
         return results
 
     async def _current_auto_trading(self, user_id:str, fallback:bool) -> bool:
@@ -210,7 +214,7 @@ class StrategyWorker:
 
     async def _log_signal_to_db(self, signal, user_id: str) -> None:
         db = await get_db()
-        await db.signals.insert_one({
+        inserted = await db.signals.insert_one({
             "userId": ObjectId(user_id),
             "strategyName": signal.strategy_name,
             "symbol": signal.symbol,
@@ -224,6 +228,10 @@ class StrategyWorker:
             "createdAt": datetime.now(timezone.utc)
         })
         log.info("signal.saved_only", user_id=user_id, symbol=signal.symbol, action=signal.action)
+        try:
+            await enqueue_review("signal", str(inserted.inserted_id))
+        except Exception as e:
+            log.warning("ai.enqueue_skipped", error=str(e))
 
     async def _notify_auth_required(self, user_id: str) -> None:
         redis = get_redis()
