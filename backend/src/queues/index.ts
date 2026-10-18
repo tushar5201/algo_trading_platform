@@ -15,6 +15,16 @@ export const strategyQueue = new Queue("strategy-runner", {
     }
 });
 
+export const AI_QUEUE_NAME = "ai-analysis";
+export const aiAnalysisQueue = new Queue(AI_QUEUE_NAME, {
+    connection: queueConnection,
+    defaultJobOptions: {
+        attempts: 1,
+        removeOnComplete: { age: 3600, count: 500 },
+        removeOnFail: { age: 86400, count: 500 },
+    }
+});
+
 export const tradeQueue = new Queue("trade-executor", {
     connection: queueConnection,
     defaultJobOptions: {

@@ -15,7 +15,7 @@ import {
     triggerStrategy,
     updateUserStatus
 } from "../controllers/admin.controller";
-import { getAllTrades } from "../controllers/trade.controller";
+import {getAllTrades, getTradeByIdAdmin} from "../controllers/trade.controller";
 import {killSwitchLimiter, triggerLimiter} from "../middleware/rateLimiter";
 
 const router = Router();
@@ -29,6 +29,7 @@ router.post('/users/:userId/risk-limits', asynchandler(setUserRiskLimits));
 router.post('/users/:userId/kill-switch', killSwitchLimiter, asynchandler(setUserKillSwitch));
 
 router.get('/trades', asynchandler(getAllTrades));
+router.get('/trades/:tradeId', asynchandler(getTradeByIdAdmin));
 
 router.post('/strategies', asynchandler(createStrategy));
 router.get('/strategies', asynchandler(listStrategies));

@@ -4,6 +4,8 @@ import mongoose from "mongoose";
 import {AppError} from "../middleware/errorhandler";
 import {cacheKeys, getOrSetCache} from "../services/cache.service";
 import {assertObjectId, parsePagination, queryString} from "../utils/pagination";
+import {writeAuditLog} from "../services/audit.service";
+import {aiAnalysisQueue} from "../queues";
 
 const PNL_CACEH_TTL_SECONDS = 60;
 const REPORT_TZ = 'Asia/Kolkata';
@@ -13,6 +15,7 @@ function buildTradeFilter(query: Record<string, unknown>, base: Record<string, u
     const status = queryString(query.status);
     if (status) {
         if (!(TRADE_STATUSES as string[]).includes(status)) throw new AppError(400, "Invalid status filter");
+        filter.status = status;
     }
     const strategy = queryString(query.strategy);
     if (strategy) filter.strategyName = strategy;
@@ -157,7 +160,7 @@ export const getAllTrades = async (req: Request, res: Response): Promise<void> =
 
     const base: Record<string, unknown> = {};
     const userId = queryString(req.query.userId);
-    if(userId) base.userId = new mongoose.Types.ObjectId(assertObjectId(userId, 'user id'));
+    if (userId) base.userId = new mongoose.Types.ObjectId(assertObjectId(userId, 'user id'));
     const filter = buildTradeFilter(req.query as Record<string, unknown>, base)
 
     const [trades, total] = await Promise.all([
@@ -171,7 +174,74 @@ export const getAllTrades = async (req: Request, res: Response): Promise<void> =
     res.json({success: true, data: {trades, total, page, totalPages: Math.ceil(total / limit)}});
 };
 
-// Signal trade detail
+export const getTradeByIdAdmin = async (req: Request, res: Response): Promise<void> => {
+    const tradeId = assertObjectId(req.params.tradeId, 'trade id');
+    const trade = await Trade.findById(tradeId).populate('userId', 'name email');
+    if (!trade) throw new AppError(404, 'Trade not found');
+    res.json({success: true, data: trade});
+};
+
+const AI_REVIEW_PENDING_STALE_MS = 15 * 60 * 1000;
+const REVIEWABLE_STATUSES = ["CLOSED", "FAILED", "NEEDS_REVIEW", "CANCELED"]
+
+export const reviewJobId = (tradeId: string): string => `review-${tradeId}`;
+const aiEnabled = (): boolean => process.env.AI_ENABLED === "true";
+
+export const requestAiReview = async (req: Request, res: Response): Promise<void> => {
+    const tradeId = assertObjectId(req.params.tradeId, "trade id");
+    const userId = new mongoose.Types.ObjectId(req.user!.userId);
+
+    if (!aiEnabled()) throw new AppError(503, 'AI review is not enabled on this server');
+    const trade = await Trade.findOne({_id: tradeId, userId: userId});
+    if (!trade) throw new AppError(404, 'Trade not found');
+    if (!REVIEWABLE_STATUSES.includes(trade.status)) {
+        throw new AppError(409, 'AI review is available once the trade has closed');
+    }
+    if (trade.aiReview?.status === "DONE") {
+        res.status(200).json({success: true, alreadyDone: true, data: {aiReview: trade.aiReview}})
+        return;
+    }
+
+    const staleBefore = new Date(Date.now() - AI_REVIEW_PENDING_STALE_MS);
+    const claimed = await Trade.findOneAndUpdate({
+        _id: tradeId,
+        userId,
+        $or: [
+            {aiReview: {$exists: false}},
+            {aiReview: null},
+            {'aiReview.status': {$in: ['FAILED', 'SKIPPED']}},
+            {'aiReview.status': 'PENDING', 'aiReview.createdAt': {$lt: staleBefore}},
+        ]
+    }, {
+        $set: {
+            aiReview: {status: 'PENDING', createdAt: new Date()}
+        },
+    }, {new: true});
+
+    if (!claimed) {
+        res.status(202).json({
+            success: true, alreadyQueued: true, data: {
+                aiReview: {status: 'PENDING'}
+            }
+        });
+        return;
+    }
+
+    try {
+        await aiAnalysisQueue.add(
+            'review',
+            {kind: 'trade', id: tradeId, attempt: 0},
+            {jobId: reviewJobId(tradeId)}
+        );
+    } catch (err) {
+        await Trade.updateOne({_id: tradeId, 'aiReview.status': 'PENDING'}, {$unset: {aiReview: 1}});
+        console.error('[ai-review] enqueue failed:', (err as Error).message);
+        throw new AppError(503, 'AI review queue is unavailable, try again later');
+    }
+    await writeAuditLog(req.user!.userId, req.user!.role, "AI_REVIEW_REQUESTED", tradeId, {});
+    res.status(202).json({success:true, data: {aiReview: {status: 'PENDING'}}});
+}
+
 export const getTradeById = async (req: Request, res: Response): Promise<void> => {
     const tradeId = assertObjectId(req.params.tradeId, 'trade id');
 
@@ -182,3 +252,5 @@ export const getTradeById = async (req: Request, res: Response): Promise<void> =
     if (!trade) throw new AppError(404, 'Trade not found');
     res.json({success: true, data: trade});
 };
+
+

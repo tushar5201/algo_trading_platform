@@ -5,7 +5,7 @@ from typing import Optional
 
 from bson import ObjectId
 
-from src.broker.errors import KotakOrderUncertainError
+from src.broker.errors import KotakOrderUncertainError, KotakIPNotAllowedError
 from src.db.audit import write_audit
 from src.db.redis_client import get_redis
 from src.execution.order_status import poll_order, classify
@@ -26,6 +26,14 @@ log = structlog.get_logger()
 LOCK_TTL_SEC = 180
 _RELEASE_LUA = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
+def rebase_exit_levels(signal: Signal, fill_price: float) -> None:
+    ref = (signal.metadata or {}).get("entry_price")
+    if not isinstance(ref, (int, float)) or ref <= 0 or not fill_price or fill_price <= 0:
+        return
+    if signal.stop_loss:
+        signal.stop_loss = round(fill_price * signal.stop_loss / ref, 2)
+    if signal.take_profit:
+        signal.take_profit = round(fill_price * signal.take_profit / ref, 2)
 
 class OrderManager:
     def __init__(self) -> None:
@@ -115,6 +123,19 @@ class OrderManager:
                 }
             )
             return {"success": False, "stage": "uncertain", "reason": str(e), "trade_id": trade_id}
+        except KotakIPNotAllowedError as e:
+            await self._mark_failed(db, trade_id, str(e))
+            await write_audit(
+                user_id,
+                "TRADE_ORDER_FAILED",
+                {"trade_id": trade_id, "symbol": signal.symbol, "error": str(e), "cause": "ip_not_whitelisted"},
+            )
+            return {
+                "success": False,
+                "stage": "ip_blocked",
+                "reason": str(e),
+                "trade_id": trade_id,
+            }
         except KotakAuthError as e:
             await self._mark_failed(db, trade_id, str(e))
             invalidate = getattr(broker, "invalidate_session", None)
@@ -186,11 +207,14 @@ class OrderManager:
             })
             return {"success": False, "stage": "fill", "reason": msg, "trade_id": trade_id, "order_id": order_id}
 
+        rebase_exit_levels(signal, fill_price)
         await self._set(db, trade_id, {
             "status": "EXECUTED",
             "orderId": order_id,
             "price": fill_price,
             "pnl": None,
+            "stopLoss": signal.stop_loss,
+            "takeProfit": signal.take_profit,
             "executedAt": datetime.now(timezone.utc),
             "metadata": {**(signal.metadata or {}), "fillResult": fill},
         })

@@ -18,6 +18,24 @@ export interface AuthState {
     clearAuth: () => void;
 }
 
+export type AiReviewStatus = 'PENDING' | 'DONE' | 'FAILED' | 'SKIPPED';
+
+export interface AiReview {
+    status: AiReviewStatus;
+    summary?: string | null;
+    bullets?: string[];
+    riskNotes?: string[];
+    whatWorked?: string | null;
+    whatDidnt?: string | null;
+    confidence?: number | null;
+    model?: string | null;
+    promptVersion?: string | null;
+    createdAt?: string | null;
+    tokensIn?: number;
+    tokensOut?: number;
+    error?: string | null;
+}
+
 export interface Trade {
     _id: string;
     strategyName: string;
@@ -35,6 +53,10 @@ export interface Trade {
     orderId: string | null;
     createdAt: string;
     executedAt: string | null;
+    closedAt?: string | null;
+    reason?: string | null;
+    confidence?: number | null;
+    aiReview?: AiReview | null;
 }
 
 export interface PnLSummary {

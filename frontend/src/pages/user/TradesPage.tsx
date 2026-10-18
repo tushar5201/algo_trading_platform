@@ -1,15 +1,17 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Filter, TrendingUp } from 'lucide-react';
+import { ChevronDown, ChevronRight, Filter, Sparkles, TrendingUp } from 'lucide-react';
 import { api } from '../../api/client';
 import clsx from 'clsx';
 import type {Trade} from "../../types";
+import AiReviewCard from "../../components/AIReviewCard.tsx";
 
 const STATUS_OPTIONS = ['ALL', 'EXECUTED', 'PENDING', 'EXIT_PENDING', 'CLOSED', 'FAILED', 'CANCELED', 'NEEDS_REVIEW'];
 
 export default function TradesPage() {
     const [status, setStatus] = useState('ALL');
     const [page,   setPage]   = useState(1);
+    const [openId, setOpenId] = useState<string | null>(null);   // trade whose AI review card is expanded
 
     const { data, isLoading } = useQuery({
         queryKey: ['trades', status, page],
@@ -98,7 +100,7 @@ export default function TradesPage() {
                         <table className="w-full text-left text-sm">
                             <thead className="border-b border-gray-100 dark:border-gray-800">
                             <tr>
-                                {['Symbol', 'Strategy', 'Side', 'Qty', 'Price', 'Status', 'P&L', 'Date'].map(h => (
+                                {['Symbol', 'Strategy', 'Side', 'Qty', 'Price', 'Status', 'P&L', 'Date', 'AI'].map(h => (
                                     <th key={h}
                                         className="px-4 py-3 text-xs font-medium text-gray-500
                                  dark:text-gray-400 uppercase tracking-wider whitespace-nowrap">
@@ -109,25 +111,26 @@ export default function TradesPage() {
                             </thead>
                             <tbody>
                             {trades.map(trade => (
-                                <tr key={trade._id}
-                                    className="border-b border-gray-50 dark:border-gray-800/50
+                                <Fragment key={trade._id}>
+                                    <tr
+                                        className="border-b border-gray-50 dark:border-gray-800/50
                                hover:bg-gray-50 dark:hover:bg-gray-800/30 transition-colors">
-                                    <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
-                                        {trade.symbol}
-                                    </td>
-                                    <td className="px-4 py-3 text-gray-500 dark:text-gray-400 whitespace-nowrap">
-                                        {trade.strategyName.replace(/_/g, ' ')}
-                                    </td>
-                                    <td className="px-4 py-3">
+                                        <td className="px-4 py-3 font-medium text-gray-900 dark:text-white whitespace-nowrap">
+                                            {trade.symbol}
+                                        </td>
+                                        <td className="px-4 py-3 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                                            {trade.strategyName.replace(/_/g, ' ')}
+                                        </td>
+                                        <td className="px-4 py-3">
                       <span className={trade.side === 'BUY' ? 'badge-green' : 'badge-red'}>
                         {trade.side}
                       </span>
-                                    </td>
-                                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{trade.qty}</td>
-                                    <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
-                                        ₹{trade.price.toFixed(2)}
-                                    </td>
-                                    <td className="px-4 py-3">
+                                        </td>
+                                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400">{trade.qty}</td>
+                                        <td className="px-4 py-3 text-gray-600 dark:text-gray-400">
+                                            ₹{trade.price.toFixed(2)}
+                                        </td>
+                                        <td className="px-4 py-3">
                       <span className={{
                           EXECUTED:     'badge-green',
                           PENDING:      'badge-yellow',
@@ -139,23 +142,40 @@ export default function TradesPage() {
                       }[trade.status] ?? 'badge-yellow'}>
                         {trade.status}
                       </span>
-                                    </td>
-                                    <td className="px-4 py-3 font-medium whitespace-nowrap">
-                                        {trade.pnl != null ? (
-                                            <span className={trade.pnl >= 0
-                                                ? 'text-emerald-600 dark:text-emerald-400'
-                                                : 'text-red-600 dark:text-red-400'}>
+                                        </td>
+                                        <td className="px-4 py-3 font-medium whitespace-nowrap">
+                                            {trade.pnl != null ? (
+                                                <span className={trade.pnl >= 0
+                                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                                    : 'text-red-600 dark:text-red-400'}>
                           {trade.pnl >= 0 ? '+' : ''}₹{trade.pnl.toFixed(2)}
                         </span>
-                                        ) : <span className="text-gray-400">—</span>}
-                                    </td>
-                                    <td className="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
-                                        {new Date(trade.createdAt).toLocaleString('en-IN', {
-                                            day: '2-digit', month: 'short',
-                                            hour: '2-digit', minute: '2-digit',
-                                        })}
-                                    </td>
-                                </tr>
+                                            ) : <span className="text-gray-400">—</span>}
+                                        </td>
+                                        <td className="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">
+                                            {new Date(trade.createdAt).toLocaleString('en-IN', {
+                                                day: '2-digit', month: 'short',
+                                                hour: '2-digit', minute: '2-digit',
+                                            })}
+                                        </td>
+                                        <td className="px-4 py-3 whitespace-nowrap">
+                                            <button
+                                                onClick={() => setOpenId(id => id === trade._id ? null : trade._id)}
+                                                className="inline-flex items-center gap-1 text-xs text-brand-600 dark:text-brand-400 hover:underline"
+                                                aria-expanded={openId === trade._id}
+                                            >
+                                                {openId === trade._id ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+                                                <Sparkles className="w-3 h-3" />
+                                                {trade.aiReview?.status === 'DONE' ? 'View' : 'Review'}
+                                            </button>
+                                        </td>
+                                    </tr>
+                                    {openId === trade._id && (
+                                        <tr className="border-b border-gray-50 dark:border-gray-800/50">
+                                            <td colSpan={9} className="px-4 py-3"><AiReviewCard trade={trade} /></td>
+                                        </tr>
+                                    )}
+                                </Fragment>
                             ))}
                             </tbody>
                         </table>

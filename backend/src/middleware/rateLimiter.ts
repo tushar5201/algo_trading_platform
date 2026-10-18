@@ -101,6 +101,14 @@ export const tradeLimiter = makeLimiter({
     keyFn: byUserOrIp
 });
 
+export const aiReviewLimiter = makeLimiter({
+    prefix: "ai_review",
+    windowMs: 60*60*1000,
+    max: 20,
+    message: "Too many AI review requests. Try again later.",
+    keyFn: byUserOrIp
+})
+
 export const kotakAuthLimiter = makeLimiter({
     prefix: "kotak_auth",
     windowMs: 5 * 60 * 1000,
