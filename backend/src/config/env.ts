@@ -14,7 +14,8 @@ const envSchema = z.object({
         (v) => Buffer.byteLength(v, 'utf-8') === 32,
         'AES_SECRET_KEY must be exactly 32 characters'
     ),
-    FRONTEND_URL: str().optional()
+    FRONTEND_URL: str().optional(),
+    RATE_LIMIT_SCALE: z.coerce.number().int().min(1).default(1)
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -1,7 +1,5 @@
-import { Router } from "express";
 import { authenticate } from "../middleware/auth";
 import { requireRole } from "../middleware/roleGuard";
-import { asynchandler } from "../middleware/errorhandler";
 import {
     getAuthStatus,
     getMyStrategies,
@@ -11,18 +9,20 @@ import {
     toggleAutoTrading,
     getCredentials
 } from "../controllers/user.controller";
-import {kotakAuthLimiter} from "../middleware/rateLimiter";
+import { kotakAuthLimiter } from "../middleware/rateLimiter";
+import { handler } from "../http";
+import { FastifyInstance } from "fastify";
 
-const router = Router();
-router.use(authenticate, requireRole('user'));
+export default async function userRoutes(app: FastifyInstance): Promise<void> {
+    app.addHook('preHandler', authenticate);
+    app.addHook('preHandler', requireRole('user'));
 
-router.post('/credentials', asynchandler(saveCredentials));
-router.patch('/toggle-trading', asynchandler(toggleAutoTrading));
-router.get('/strategies', asynchandler(getMyStrategies));
-router.get('/credentials', asynchandler(getCredentials));
+    app.post('/credentials', handler(saveCredentials));
+    app.patch('/toggle-trading', handler(toggleAutoTrading));
+    app.get('/strategies', handler(getMyStrategies));
+    app.get('/credentials', handler(getCredentials));
 
-router.post('/kotak/totp', kotakAuthLimiter, asynchandler(submitTOTP));
-router.post('/kotak/mpin', kotakAuthLimiter, asynchandler(submitMPIN));
-router.get('/kotak/auth-status', asynchandler(getAuthStatus));
-
-export default router;
+    app.post('/kotak/totp', { preHandler: kotakAuthLimiter }, handler(submitTOTP));
+    app.post('/kotak/mpin', { preHandler: kotakAuthLimiter }, handler(submitMPIN));
+    app.get('/kotak/auth-status', handler(getAuthStatus));
+}

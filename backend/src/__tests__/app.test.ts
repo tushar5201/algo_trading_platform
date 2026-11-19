@@ -1,57 +1,76 @@
+import { beforeAll, describe, expect, it, jest } from '@jest/globals';
 
-import { describe, expect, it, jest } from '@jest/globals';
-import { redis } from '../config/redis';
-import { strategyQueue, tradeQueue } from '../queues';
-import { User } from '../models/User';
-
-jest.mock('../config/redis');
-jest.mock('../queues');
+jest.mock('../config/redis', () => ({
+    redis: { eval: jest.fn(async () => [1, 60]), get: jest.fn(async () => null), setex: jest.fn(), del: jest.fn(), decr: jest.fn() },
+}));
+jest.mock('../queues', () => ({ strategyQueue: {}, tradeQueue: {}, aiAnalysisQueue: {} }));
 jest.mock('../models/User');
 
-const mockedRedis = jest.mocked(redis);
-const mockedStrategyQueue = jest.mocked(strategyQueue);
-const mockedTradeQueue = jest.mocked(tradeQueue);
-const mockedUser = jest.mocked(User);
-
-mockedRedis.incr.mockResolvedValue(1);
-mockedRedis.expire.mockResolvedValue(1);
-mockedRedis.ttl.mockResolvedValue(60);
-mockedRedis.decr.mockResolvedValue(0);
-mockedRedis.del.mockResolvedValue(1);
-mockedRedis.get.mockResolvedValue(null);
-mockedRedis.setex.mockResolvedValue('OK');
-mockedRedis.options = {
-    host: 'localhost',
-    port: 6379
-};
-
-// Strategy Queue
-mockedStrategyQueue.add.mockResolvedValue(undefined as any);
-mockedStrategyQueue.getWaitingCount.mockResolvedValue(0);
-mockedStrategyQueue.getActiveCount.mockResolvedValue(0);
-mockedStrategyQueue.getFailedCount.mockResolvedValue(0);
-mockedStrategyQueue.getCompletedCount.mockResolvedValue(0);
-
-// Trade Queue
-mockedTradeQueue.add.mockResolvedValue(undefined as any);
-mockedTradeQueue.getWaitingCount.mockResolvedValue(0);
-mockedTradeQueue.getActiveCount.mockResolvedValue(0);
-mockedTradeQueue.getFailedCount.mockResolvedValue(0);
-mockedTradeQueue.getCompletedCount.mockResolvedValue(0);
-
-// User
-mockedUser.findOne.mockReturnValue({
-    // cast the mock to any to satisfy TS when resolving null
-    select: jest.fn(async () => null),
-} as any);
-
-import request from "supertest";
-import app from '../app';
+import type { FastifyInstance } from 'fastify';
+import { buildApp } from '../app';
 
 describe('app', () => {
-    it("GET /api/health returns 200 without authentication", async () => {
-        const res = await request(app).get('/api/health');
-        expect(res.status).toBe(200);
-        expect(res.body.status).toBe("ok");
+    let app: FastifyInstance;
+    beforeAll(async () => { app = await buildApp(); await app.ready(); });
+
+    it('GET /api/health returns 200 without authentication', async () => {
+        const res = await app.inject({ method: 'GET', url: '/api/health' });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().status).toBe('ok');
+    });
+
+    it('unknown routes return a JSON 404', async () => {
+        const res = await app.inject({ method: 'GET', url: '/api/nope' });
+        expect(res.statusCode).toBe(404);
+        expect(res.json()).toEqual({ message: 'Route not found' });
+    });
+
+    it('an empty body with a JSON content type is accepted (same as express.json)', async () => {
+        const res = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { 'content-type': 'application/json' } });
+        expect(res.statusCode).toBe(400);               // reaches the controller, which rejects the missing fields
+        expect(res.json().message).toBeDefined();
+    });
+
+    it('invalid JSON is a 400, not a 500', async () => {
+        const res = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { 'content-type': 'application/json' }, payload: '{bad' });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().message).toMatch(/Invalid JSON/);
+    });
+
+    it('bodies over 10kb are rejected with 413', async () => {
+        const res = await app.inject({ method: 'POST', url: '/api/auth/login', headers: { 'content-type': 'application/json' },
+            payload: JSON.stringify({ email: 'a@b.com', password: 'x'.repeat(20_000) }) });
+        expect(res.statusCode).toBe(413);
+    });
+
+    it('sends security headers and no x-powered-by', async () => {
+        const res = await app.inject({ method: 'GET', url: '/api/health' });
+        expect(res.headers['x-powered-by']).toBeUndefined();
+        expect(res.headers['x-content-type-options']).toBe('nosniff');
+    });
+
+    it('answers CORS preflight', async () => {
+        const res = await app.inject({ method: 'OPTIONS', url: '/api/auth/login',
+            headers: { origin: 'http://localhost:5173', 'access-control-request-method': 'POST' } });
+        expect(res.statusCode).toBe(204);
+        expect(res.headers['access-control-allow-origin']).toBeDefined();
+    });
+
+    it('uses X-Forwarded-For from a private proxy (nginx) as the client ip', async () => {
+        let seen = '';
+        const probe = await buildApp();
+        probe.get('/api/ip', async (req) => { seen = req.ip; return {}; });
+        await probe.inject({ method: 'GET', url: '/api/ip', remoteAddress: '172.18.0.5', headers: { 'x-forwarded-for': '203.0.113.9' } });
+        expect(seen).toBe('203.0.113.9');
+        await probe.close();
+    });
+
+    it('ignores X-Forwarded-For from a public address (cannot be spoofed)', async () => {
+        let seen = '';
+        const probe = await buildApp();
+        probe.get('/api/ip', async (req) => { seen = req.ip; return {}; });
+        await probe.inject({ method: 'GET', url: '/api/ip', remoteAddress: '198.51.100.7', headers: { 'x-forwarded-for': '203.0.113.9' } });
+        expect(seen).toBe('198.51.100.7');
+        await probe.close();
     });
 });

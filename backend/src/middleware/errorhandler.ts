@@ -1,4 +1,4 @@
-import { NextFunction, Request, Response } from "express";
+import { FastifyReply, FastifyRequest } from "fastify";
 
 export class AppError extends Error {
     constructor(public statusCode: number, public message: string) {
@@ -7,38 +7,23 @@ export class AppError extends Error {
     }
 }
 
-export const asynchandler = (fn: (req: Request, res: Response, next: NextFunction) => Promise<void>) =>
-    (req: Request, res: Response, next: NextFunction): void => {
-        fn(req, res, next).catch(next);
-    };
-
-export const errorHandler = (err: Error, req: Request, res: Response, next: NextFunction): void => {
-    console.error(err.stack);
-
-    if(res.headersSent) {
-        next(err);
-        return;
-    }
-
+export function toHttpError(err: Error): { status: number; message: string } {
     if (err.name === 'AppError') {
-        res.status((err as AppError).statusCode).json({ message: err.message });
-        return;
+        return { status: (err as AppError).statusCode, message: err.message };
+
     }
 
     if (err.name === 'ZodError') {
         const issues = (err as any).issues as Array<{ message: string }> | undefined;
-        res.status(400).json({ message: issues?.[0]?.message ?? "Invalid request" });
-        return;
+        return { status: 400, message: issues?.[0]?.message ?? "Invalid request" };
     }
 
     if (err.name === 'ValidationError') {
-        res.status(400).json({ message: err.message });
-        return;
+        return { status: 400, message: err.message };
     }
 
     if (err.name === 'CastError' || err.name === 'BSONError' || err.name === 'BSONTypeError') {
-        res.status(400).json({ message: 'Invalid identifier or value' });
-        return;
+        return { status: 400, message: 'Invalid identifier or value' };
     }
 
     if ((err.name === 'MongoServerError' || err.name === 'MongoError') && (err as any).code === 11000) {
@@ -48,15 +33,27 @@ export const errorHandler = (err: Error, req: Request, res: Response, next: Next
             : keys.length
                 ? `Duplicate value for: ${keys.join(', ')}`
                 : "Duplicate value";
-        res.status(409).json({ message });
-        return;
+        return { status: 409, message };
     }
 
     const knownStatus = (err as any).statusCode ?? (err as any).status;
     if (typeof knownStatus === 'number' && knownStatus >= 400 && knownStatus < 500) {
-        res.status(knownStatus).json({ message: err.message || "Bad Request" });
-        return;
+        return { status: knownStatus, message: err.message || "Bad Request" };
     }
 
-    res.status(500).json({ message: "Internal Server Error" });
+    return { status: 500, message: "Internal Server Error" };
+};
+
+export const errorHandler = (err: Error, request: FastifyRequest, reply: FastifyReply): void => {
+    const { status, message } = toHttpError(err);
+
+    if (status >= 500) request.log.error({ err }, "request failed");
+    else request.log.warn({ status, message }, "request rejected");
+
+    if (reply.sent) return;
+    void reply.code(status).send({ message });
+}
+
+export const notFoundHandler = (_request: FastifyRequest, reply: FastifyReply): void => {
+    void reply.code(404).send({ message: "Route not found" });
 };

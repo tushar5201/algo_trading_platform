@@ -1,16 +1,17 @@
-import { Router } from "express";
 import { authenticate } from "../middleware/auth";
 import { requireRole } from "../middleware/roleGuard";
-import { asynchandler } from "../middleware/errorhandler";
-import {getMyPnl, getMyTrades, getTradeById, requestAiReview} from "../controllers/trade.controller";
-import {aiReviewLimiter, tradeLimiter} from "../middleware/rateLimiter";
+import { getMyPnl, getMyTrades, getTradeById, requestAiReview } from "../controllers/trade.controller";
+import { aiReviewLimiter, tradeLimiter } from "../middleware/rateLimiter";
+import { FastifyInstance } from "fastify";
+import { handler } from "../http";
 
-const router = Router();
-router.use(authenticate, requireRole('user'), tradeLimiter);
+export default async function tradesRoutes(app: FastifyInstance): Promise<void> {
+    app.addHook('preHandler', authenticate);
+    app.addHook('preHandler', requireRole('user'));
+    app.addHook('preHandler', tradeLimiter);
 
-router.get("/", asynchandler(getMyTrades));
-router.get("/pnl", asynchandler(getMyPnl));
-router.get("/:tradeId", asynchandler(getTradeById));
-router.post("/:tradeId/ai-review", aiReviewLimiter, asynchandler(requestAiReview));
-
-export default router;
+    app.get("/", handler(getMyTrades));
+    app.get("/pnl", handler(getMyPnl));
+    app.get("/:tradeId", handler(getTradeById));
+    app.post("/:tradeId/ai-review", { preHandler: aiReviewLimiter }, handler(requestAiReview));
+}
