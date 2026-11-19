@@ -7,8 +7,9 @@ from src.ai.jobs import AIWorker
 from src.config.logging_conf import setup_logging
 from src.config.settings import settings
 from src.db.mongo import connect_db, disconnect_db
-from src.db.redis_client import connect_redis, disconnect_redis
+from src.db.redis_client import connect_redis, disconnect_redis, get_redis
 from src.queue.worker import StrategyWorker
+from src.strategies.registry import publish_available_strategies
 from src.broker.session_manager import SessionManager
 from src.execution.sl_tp_monitor import SLTPMonitor
 from src.health.checker import get_health
@@ -39,6 +40,7 @@ async def main() -> None:
 
     await connect_db()
     await connect_redis()
+    await publish_available_strategies(get_redis())
 
     session_manager = SessionManager()
     worker = StrategyWorker()
