@@ -6,6 +6,7 @@ jest.mock("../../models/User", () => ({
 jest.mock("../../models/Strategy", () => ({ Strategy: { find: jest.fn(), findOne: jest.fn(), create: jest.fn() } }));
 jest.mock("../../models/KillSwitch", () => ({ KillSwitch: { findOne: jest.fn(), findOneAndUpdate: jest.fn() } }));
 jest.mock("../../services/audit.service", () => ({ writeAuditLog: jest.fn(async () => undefined) }));
+jest.mock("../../services/auth.cache.service", () => ({ invalidateAccount: jest.fn(async () => undefined) }));
 jest.mock("../../services/queue.service", () => ({ publishStrategyRun: jest.fn() }));
 jest.mock("../../config/redis", () => ({ redis: { ping: jest.fn(), get: jest.fn() } }));
 jest.mock("../../queues", () => {
@@ -18,6 +19,7 @@ import { User } from "../../models/User";
 import { Strategy } from "../../models/Strategy";
 import { KillSwitch } from "../../models/KillSwitch";
 import { writeAuditLog } from "../../services/audit.service";
+import { invalidateAccount } from "../../services/auth.cache.service";
 import { publishStrategyRun } from "../../services/queue.service";
 import { redis } from "../../config/redis";
 import { strategyQueue, tradeQueue } from "../../queues";
@@ -28,6 +30,7 @@ const U = User as unknown as Record<string, Fn>;
 const S = Strategy as unknown as Record<string, Fn>;
 const K = KillSwitch as unknown as Record<string, Fn>;
 const audit = writeAuditLog as Fn;
+const invalidate = invalidateAccount as Fn;
 const publish = publishStrategyRun as Fn;
 const R = redis as unknown as { ping: Fn; get: Fn };
 const SQ = strategyQueue as unknown as Record<string, Fn>;
@@ -58,7 +61,7 @@ const userDoc = (over: any = {}) => ({
 beforeEach(() => {
     jest.spyOn(console, "error").mockImplementation(() => undefined);
     [U, S, K].forEach(o => Object.values(o).forEach(f => f.mockReset()));
-    [audit, publish, R.ping, R.get, ...Object.values(SQ), ...Object.values(TQ)].forEach(f => f.mockReset());
+    [invalidate, audit, publish, R.ping, R.get, ...Object.values(SQ), ...Object.values(TQ)].forEach(f => f.mockReset());
     audit.mockResolvedValue(undefined);
 });
 
@@ -74,6 +77,14 @@ describe("getAllUsers", () => {
         expect(find.limit).toHaveBeenCalledWith(20);
         expect(find.select).toHaveBeenCalledWith("-passwordHash");
         expect(res.body.data).toMatchObject({ total: 45, page: 2, totalPages: 3 });
+    });
+
+    it("skips the count query when the first page is not full", async () => {
+        U.find.mockReturnValue(chain([{ email: "a" }]));
+        const res = makeRes();
+        await admin.getAllUsers(adminReq(), res);
+        expect(U.countDocuments).not.toHaveBeenCalled();
+        expect(res.body.data).toMatchObject({ total: 1, page: 1, totalPages: 1 });
     });
 
     it("applies a valid status filter and rejects an invalid one", async () => {
@@ -107,6 +118,7 @@ describe("updateUserStatus", () => {
         expect(u.status).toBe("APPROVED");
         expect(u.save).toHaveBeenCalled();
         expect(audit).toHaveBeenCalledWith(ADMIN_ID, "admin", "USER_APPROVED", USER_ID, { reason: "KYC ok" });
+        expect(invalidate).toHaveBeenCalledWith(USER_ID);       // access change is effective immediately, not after the cache TTL
         expect(res.body.data).toMatchObject({ email: "u@x.com", status: "APPROVED" });
     });
 
@@ -337,8 +349,10 @@ describe("getHealth", () => {
         R.ping.mockResolvedValue("PONG"); K.findOne.mockReturnValue(Promise.resolve(null));
         const res = makeRes();
         await admin.getHealth(adminReq(), res);
-        expect(res.body.data).toMatchObject({ status: "healthy", killSwitchActive: false,
-            checks: { mongodb: { status: "up" }, redis: { status: "up" } } });
+        expect(res.body.data).toMatchObject({
+            status: "healthy", killSwitchActive: false,
+            checks: { mongodb: { status: "up" }, redis: { status: "up" } }
+        });
     });
 
     it("degraded, with the error message, when a dependency is down; reports an active kill switch", async () => {

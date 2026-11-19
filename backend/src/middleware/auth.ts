@@ -1,20 +1,13 @@
-import { NextFunction, Request, Response } from "express";
 import { JwtPayload, verifyToken } from "../services/auth.service";
-import {User} from "../models/User";
+import { FastifyRequest } from "fastify";
+import { AppError } from "./errorhandler";
+import { getAccount } from "../services/auth.cache.service";
+import "../http"
 
-declare global {
-    namespace Express {
-        interface Request {
-            user?: JwtPayload;
-        }
-    }
-}
-
-export const authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+export const authenticate = async (req: FastifyRequest): Promise<void> => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        res.status(401).json({ message: "No token provided" });
-        return;
+        throw new AppError(401, "No token provided");
     }
     const token = authHeader.split(" ")[1];
 
@@ -22,23 +15,16 @@ export const authenticate = async (req: Request, res: Response, next: NextFuncti
     try {
         payload = verifyToken(token);
     } catch (error) {
-        res.status(401).json({ message: "Invalid token" });
-        return;
+        throw new AppError(401, "Invalid token");
     }
 
-    try {
-        const account = await User.findById(payload.userId).select("role status isActive email");
-        if(!account || !account.isActive || account.status !== "APPROVED") {
-            res.status(401).json({ message: "Account is not active" });
-            return;
-        }
-        req.user = {
-            userId: payload.userId,
-            role: account.role,
-            email: account.email
-        };
-        next();
-    } catch (error) {
-        next(error);
+    const account = await getAccount(payload.userId);
+    if (!account || !account.isActive || account.status !== "APPROVED") {
+        throw new AppError(401, "Account is not active");
     }
+    req.user = {
+        userId: payload.userId,
+        role: account.role,
+        email: account.email
+    };
 };

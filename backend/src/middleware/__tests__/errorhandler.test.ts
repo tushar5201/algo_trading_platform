@@ -1,52 +1,95 @@
 import { describe, expect, it, jest } from "@jest/globals";
-import { AppError, errorHandler } from "../errorhandler";
+import { AppError, errorHandler, notFoundHandler, toHttpError } from "../errorhandler";
 
-function run(err: Error) {
-    const res: any = { headersSent: false, statusCode: 0, body: undefined as any };
-    res.status = (c: number) => { res.statusCode = c; return res; };
-    res.json = (b: unknown) => { res.body = b; return res; };
-    jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    errorHandler(err, {} as any, res, jest.fn() as any);
-    return res;
+const named = (name: string, extra: Record<string, unknown> = {}) => Object.assign(new Error("boom"), { name }, extra);
+
+function makeReply() {
+    const reply: any = { statusCode: 200, body: undefined as any, sent: false };
+    reply.code = (c: number) => { reply.statusCode = c; return reply; };
+    reply.send = (b: unknown) => { reply.body = b; reply.sent = true; return reply; };
+    return reply;
 }
-const named = (name: string, extra: object = {}) => Object.assign(new Error('boom'), { name }, extra);
+const makeReq = () => ({ log: { error: jest.fn(), warn: jest.fn() } }) as any;
 
-describe('errorHandler', () => {
-    it('AppError -> its own status', () => {
-        const r = run(new AppError(418, 'teapot'));
-        expect(r.statusCode).toBe(418);
-        expect(r.body.message).toBe('teapot');
+describe("toHttpError", () => {
+    it("AppError -> its own status", () => {
+        expect(toHttpError(new AppError(418, "teapot"))).toEqual({ status: 418, message: "teapot" });
     });
 
-    it('ZodError -> 400 (used to be 500)', () => {
-        const r = run(named('ZodError', { issues: [{ message: 'bad field' }] }));
-        expect(r.statusCode).toBe(400);
-        expect(r.body.message).toBe('bad field');
+    it("ZodError -> 400 (used to be 500)", () => {
+        expect(toHttpError(named("ZodError", { issues: [{ message: "bad field" }] }))).toEqual({ status: 400, message: "bad field" });
+        expect(toHttpError(named("ZodError")).status).toBe(400);
     });
 
-    it('CastError (bad ObjectId) -> 400 (used to be 500)', () => {
-        expect(run(named('CastError')).statusCode).toBe(400);
+    it("mongoose ValidationError -> 400", () => {
+        expect(toHttpError(named("ValidationError")).status).toBe(400);
     });
 
-    it('duplicate key on email -> 409 "Email already exists"', () => {
-        const r = run(named('MongoServerError', { code: 11000, keyPattern: { email: 1 } }));
-        expect(r.statusCode).toBe(409);
-        expect(r.body.message).toBe('Email already exists');
+    it("CastError (bad ObjectId) -> 400 (used to be 500)", () => {
+        expect(toHttpError(named("CastError"))).toEqual({ status: 400, message: "Invalid identifier or value" });
+        expect(toHttpError(named("BSONError")).status).toBe(400);
     });
 
-    it('duplicate key on another field does NOT claim the email exists', () => {
-        const r = run(named('MongoServerError', { code: 11000, keyPattern: { name: 1 } }));
-        expect(r.statusCode).toBe(409);
-        expect(r.body.message).not.toMatch(/email/i);
+    it("duplicate key on email -> 409 \"Email already exists\"", () => {
+        expect(toHttpError(named("MongoServerError", { code: 11000, keyPattern: { email: 1 } })))
+            .toEqual({ status: 409, message: "Email already exists" });
     });
 
-    it('a non-duplicate MongoServerError is a 500, not a 409', () => {
-        expect(run(named('MongoServerError', { code: 121 })).statusCode).toBe(500);
+    it("duplicate key on another field does NOT claim the email exists", () => {
+        const out = toHttpError(named("MongoServerError", { code: 11000, keyPattern: { name: 1 } }));
+        expect(out.status).toBe(409);
+        expect(out.message).toBe("Duplicate value for: name");
+        expect(toHttpError(named("MongoServerError", { code: 11000 })).message).toBe("Duplicate value");
     });
 
-    it('unknown errors -> 500 without leaking details', () => {
-        const r = run(new Error('secret internals'));
-        expect(r.statusCode).toBe(500);
-        expect(r.body.message).toBe('Internal Server Error');
+    it("a non-duplicate MongoServerError is a 500, not a 409", () => {
+        expect(toHttpError(named("MongoServerError", { code: 121 })).status).toBe(500);
+    });
+
+    it("client errors that already carry a status keep it (fastify: body too large, bad json, wrong media type)", () => {
+        expect(toHttpError(named("FastifyError", { statusCode: 413, message: "Request body is too large" })))
+            .toEqual({ status: 413, message: "Request body is too large" });
+        expect(toHttpError(named("FastifyError", { statusCode: 415 })).status).toBe(415);
+    });
+
+    it("a 5xx status on an unknown error is not trusted: 500 without details", () => {
+        const out = toHttpError(named("Error", { statusCode: 503, message: "secret connection string" }));
+        expect(out).toEqual({ status: 500, message: "Internal Server Error" });
+    });
+
+    it("unknown errors -> 500 without leaking details", () => {
+        expect(toHttpError(new Error("db password is hunter2"))).toEqual({ status: 500, message: "Internal Server Error" });
+    });
+});
+
+describe("errorHandler / notFoundHandler", () => {
+    it("replies with the mapped status and a message-only body", () => {
+        const reply = makeReply(); const req = makeReq();
+        errorHandler(new AppError(404, "Trade not found"), req, reply);
+        expect(reply.statusCode).toBe(404);
+        expect(reply.body).toEqual({ message: "Trade not found" });
+        expect(req.log.warn).toHaveBeenCalled();
+        expect(req.log.error).not.toHaveBeenCalled();
+    });
+
+    it("logs 500s as errors and hides the cause from the client", () => {
+        const reply = makeReply(); const req = makeReq();
+        errorHandler(new Error("kaboom"), req, reply);
+        expect(reply.statusCode).toBe(500);
+        expect(reply.body).toEqual({ message: "Internal Server Error" });
+        expect(req.log.error).toHaveBeenCalled();
+    });
+
+    it("does not try to reply twice", () => {
+        const reply = makeReply(); reply.sent = true;
+        errorHandler(new AppError(400, "x"), makeReq(), reply);
+        expect(reply.body).toBeUndefined();
+    });
+
+    it("notFoundHandler answers a JSON 404", () => {
+        const reply = makeReply();
+        notFoundHandler({} as any, reply);
+        expect(reply.statusCode).toBe(404);
+        expect(reply.body).toEqual({ message: "Route not found" });
     });
 });

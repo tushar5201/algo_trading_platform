@@ -1,13 +1,11 @@
-import {getMe, login, signup} from "../controllers/auth.controller";
-import {authenticate} from "../middleware/auth";
-import {asynchandler} from "../middleware/errorhandler";
-import {authLimiter} from "../middleware/rateLimiter";
-import express from "express";
+import type { FastifyInstance } from "fastify";
+import { getMe, login, signup } from "../controllers/auth.controller";
+import { authenticate } from "../middleware/auth";
+import { authLimiter } from "../middleware/rateLimiter";
+import { handler } from "../http";
 
-const router = express.Router();
-
-router.post('/signup', authLimiter, asynchandler(signup));
-router.post('/login', authLimiter, asynchandler(login));
-router.get('/me', authenticate, asynchandler(getMe));
-
-export default router;
+export default async function authRoutes(app: FastifyInstance): Promise<void> {
+    app.post('/signup', { preHandler: authLimiter }, handler(signup));
+    app.post('/login', { preHandler: authLimiter }, handler(login));
+    app.get('/me', { preHandler: authenticate }, handler(getMe));
+}

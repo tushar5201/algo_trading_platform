@@ -1,13 +1,11 @@
-import { NextFunction, Request, Response } from "express";
+import { FastifyRequest } from "fastify";
+import { AppError } from "./errorhandler";
 
-export const requireRole = (...roles: string[]) => (req: Request, res: Response, next: NextFunction):void => {
-    if(!req.user) {
-        res.status(401).json({ message: "Unauthorized" });
-        return;
-    }
-    if(!roles.includes(req.user.role)) {
-        res.status(403).json({ message: "Insufficient permissions" });
-        return;
-    }
-    next();
+
+export const requireRole = (...roles: string[]) => async (request: FastifyRequest): Promise<void> => {
+    if(!request.user)
+        throw new AppError(401, "Unauthorized");
+    
+    if(!roles.includes(request.user.role))
+        throw new AppError(403, "Insufficient permissions");
 }

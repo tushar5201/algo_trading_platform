@@ -1,44 +1,71 @@
 import dotenv from "dotenv";
-import express from "express";
-import helmet from "helmet";
-import cors from "cors";
-import morgan from "morgan";
-import {apiLimiter} from "./middleware/rateLimiter";
+import helmet from "@fastify/helmet";
+import cors from "@fastify/cors";
+import { apiLimiter } from "./middleware/rateLimiter";
 import authRoutes from "./routes/auth.routes";
-import { errorHandler } from "./middleware/errorhandler";
+import { errorHandler, notFoundHandler } from "./middleware/errorhandler";
 import adminRoutes from "./routes/admin.routes";
 import userRoutes from "./routes/user.routes";
 import tradesRoutes from "./routes/trades.routes";
-import {env} from "./config/env";
+import { env } from "./config/env";
+import "./http";
+import Fastify, { FastifyInstance } from "fastify";
 
 dotenv.config();
-const app = express();
 
-app.use(helmet());
-app.use(cors({ origin: env.FRONTEND_URL ?? (env.NODE_ENV === 'production' ? false : true) }));
+const BODY_LIMIT_BYTES = 10 * 1024;
 
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true, limit: '10kb' }));
+export async function buildApp(): Promise<FastifyInstance> {
+    const app = Fastify({
+        logger: env.NODE_ENV === "test" ? false : { level: "info" },
+        disableRequestLogging: true,
+        trustProxy: "loopback,linklocal,uniquelocal",
+        bodyLimit: BODY_LIMIT_BYTES
+    });
 
-app.use(morgan(env.NODE_ENV === 'production' ? 'combined': 'dev'));
+    app.register(helmet);
+    app.register(cors, { origin: env.FRONTEND_URL ?? (env.NODE_ENV === 'production' ? false : true) });
 
-app.set("trust proxy", 1);
+    app.decorateReply("json", function (this: any, body: unknown) {
+        return this.send(body);
+    });
+    app.decorateRequest("user", null);
 
-app.use("/api", apiLimiter);
+    app.addContentTypeParser("application/json", { parseAs: "string", bodyLimit: BODY_LIMIT_BYTES }, (_req, body, done) => {
+        const text = typeof body === "string" ? body : body.toString("utf8");
+        if (text.length === 0) return done(null, {});
+        try {
+            done(null, JSON.parse(text));
+        } catch {
+            const err: any = new Error("Invalid JSON body");
+            err.statusCode = 400;
+            done(err, undefined);
+        }
+    });
 
-app.get("/api/health", (req, res) => {
-    res.json({ success: true, status: "ok", time: new Date().toISOString() });
-});
+    app.addHook("onRequest", async (request, reply) => {
+        if (request.url.startsWith("/api")) return apiLimiter(request, reply);
+    });
 
-app.use("/api/auth", authRoutes);
-app.use("/api/admin", adminRoutes);
-app.use("/api/user", userRoutes);
-app.use("/api/trades", tradesRoutes);
+    app.addHook("onResponse", async (request, reply) => {
+        if (request.url === "/api/health") return;
+        request.log.info({
+            method: request.method,
+            url: request.url,
+            status: reply.statusCode,
+            ms: Math.round(reply.elapsedTime)
+        }, "rquest");
+    });
 
-app.use((req,res) => {
-    res.status(404).json({ message: "Route not found" });
-});
+    app.setErrorHandler(errorHandler);
+    app.setNotFoundHandler(notFoundHandler);
 
-app.use(errorHandler);
+    app.get("/api/health", async () => ({ success: true, status: "ok", time: new Date().toISOString() }));
 
-export default app;
+    app.register(authRoutes, { prefix: "/api/auth" });
+    app.register(adminRoutes, { prefix: "/api/admin" });
+    app.register(userRoutes, { prefix: "/api/user" });
+    app.register(tradesRoutes, { prefix: "/api/trades" });
+
+    return app;
+}

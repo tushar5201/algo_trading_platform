@@ -1,0 +1,1 @@
+exports.stringifySetCookie = (name, value) => `${name}=${encodeURIComponent(value)}`;

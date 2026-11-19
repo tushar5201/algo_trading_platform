@@ -5,6 +5,7 @@ module.exports = {
     transform: {
         '^.+\\.tsx?$': ['ts-jest', { tsconfig: 'tsconfig.test.json' }],
     },
+    moduleNameMapper: { '^cookie$': '<rootDir>/src/__tests__/shims/cookie.js' },
     testMatch: ['<rootDir>/src/**/__tests__/**/*.test.ts'],
     setupFiles: ['<rootDir>/src/__tests__/setupEnv.ts'],
     clearMocks: true,

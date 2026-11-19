@@ -1,5 +1,5 @@
-import { z } from "zod";
-import { Request, Response } from "express";
+﻿import { z } from "zod";
+import { Request, Response } from "../http";
 import { AppError } from "../middleware/errorhandler";
 import { comparePassword, hashPassword, signToken } from "../services/auth.service";
 import { User } from "../models/User";

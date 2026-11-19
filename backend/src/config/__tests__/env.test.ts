@@ -33,6 +33,29 @@ describe('config/env', () => {
         expect(env.JWT_EXPIRES_IN).toBe('7d');
         expect(env.REDIS_HOST).toBe('redis');
         expect(env.REDIS_PORT).toBe('6379');
+        expect(env.RATE_LIMIT_SCALE).toBe(1);
+    });
+
+    it('RATE_LIMIT_SCALE (load tests only) is read as a positive integer', () => {
+        process.env.JWT_SECRET = 'a'.repeat(32);
+        process.env.MONGO_URI = 'mongodb://localhost:27017/db';
+        process.env.AES_SECRET_KEY = 'b'.repeat(32);
+        process.env.RATE_LIMIT_SCALE = '1000';
+        expect(require('../env').env.RATE_LIMIT_SCALE).toBe(1000);
+    });
+
+    it('exits the process when RATE_LIMIT_SCALE is zero, negative or not a number', () => {
+        const exit = jest.spyOn(process, 'exit').mockImplementation((() => { throw new Error('exit'); }) as any);
+        jest.spyOn(console, 'log').mockImplementation(() => undefined);
+        for (const bad of ['0', '-5', 'abc']) {
+            jest.resetModules();
+            process.env.JWT_SECRET = 'a'.repeat(32);
+            process.env.MONGO_URI = 'mongodb://localhost:27017/db';
+            process.env.AES_SECRET_KEY = 'b'.repeat(32);
+            process.env.RATE_LIMIT_SCALE = bad;
+            expect(() => require('../env')).toThrow('exit');
+        }
+        expect(exit).toHaveBeenCalledTimes(3);
     });
 
     it('exits the process when JWT_SECRET is too short', () => {

@@ -1,9 +1,9 @@
-import z from "zod";
+﻿import z from "zod";
 import { User } from "../models/User";
 import { AppError } from "../middleware/errorhandler";
 import { decrypt, encrypt } from "../services/crypto.service";
 import { writeAuditLog } from "../services/audit.service";
-import { Request, Response } from "express";
+import { Request, Response } from "../http";
 import { redis } from "../config/redis";
 
 const credentialsSchema = z.object({
@@ -51,7 +51,7 @@ export const submitTOTP = async (req: Request, res: Response): Promise<void> => 
     });
 };
 
-// ── Step 2: Submit MPIN → activates trading session ──────────────────────
+// â”€â”€ Step 2: Submit MPIN â†’ activates trading session â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const mpinSchema = z.object({
     mpin: z.string().length(6, 'MPIN must be 6 digits'),
 });
@@ -86,7 +86,7 @@ export const submitMPIN = async (req: Request, res: Response): Promise<void> => 
     });
 };
 
-// ── Check for auth errors ─────────────────────────────────────────────────
+// â”€â”€ Check for auth errors â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 export const getAuthStatus = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.userId;
 
@@ -145,7 +145,7 @@ export const getMyStrategies = async (req: Request, res: Response): Promise<void
     res.json({ success: true, data: { assignedStrategies: user.assignedStrategies } });
 }
 
-// ── Return decrypted stored credentials for the authenticated user
+// â”€â”€ Return decrypted stored credentials for the authenticated user
 export const getCredentials = async (req: Request, res: Response): Promise<void> => {
     const user = await User.findById(req.user!.userId).select("+encryptedCredentials");
     if (!user) throw new AppError(404, 'User not found');
