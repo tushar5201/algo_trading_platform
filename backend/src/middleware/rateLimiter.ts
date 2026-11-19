@@ -89,14 +89,14 @@ export const authLimiter = makeLimiter({
 export const apiLimiter = makeLimiter({
     prefix: "api",
     windowMs: 15 * 60 * 1000, // 1 hour
-    max: 1000,
+    max: 10000000,
     message: "Too many requests, please try again after an 15 mins"
 });
 
 export const tradeLimiter = makeLimiter({
     prefix: "trades",
     windowMs: 60 * 1000,
-    max: 120,
+    max: 10000000,
     message: "Too many trade history requests. The dashboard refreshes automatically — no need to refresh manually.",
     keyFn: byUserOrIp
 });

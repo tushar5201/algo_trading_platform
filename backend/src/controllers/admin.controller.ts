@@ -144,6 +144,29 @@ export const toggleUserTrading = async (req: Request, res: Response): Promise<vo
     });
 }
 
+const ENGINE_STRATEGIES_KEY = 'engine:strategies';
+
+/** Names of strategies that have a logic file in the python engine (published by the engine on startup). */
+async function getEngineStrategies(): Promise<string[]> {
+    const raw = await redis.get(ENGINE_STRATEGIES_KEY);
+    if (!raw) throw new AppError(503, 'The strategy engine has not reported its strategies yet. Make sure it is running and try again.');
+    try {
+        const list = JSON.parse(raw);
+        return Array.isArray(list) ? list.map((n) => String(n).toLowerCase()) : [];
+    } catch {
+        throw new AppError(503, 'The strategy engine reported an invalid strategy list.');
+    }
+}
+
+export const getAvailableStrategies = async (_req: Request, res: Response): Promise<void> => {
+    const engine = await getEngineStrategies();
+    const existing = new Set((await Strategy.find({}).select('name')).map((s: any) => s.name));
+    res.json({
+        success: true,
+        data: engine.map((name) => ({ name, registered: existing.has(name) })),
+    });
+};
+
 export const createStrategy = async (req: Request, res: Response): Promise<void> => {
     const schema = z.object({
         name: z.string().trim().min(2),
@@ -155,9 +178,16 @@ export const createStrategy = async (req: Request, res: Response): Promise<void>
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) throw new AppError(400, parsed.error.errors[0].message);
 
+    const name = parsed.data.name.toLowerCase();
+    const engine = await getEngineStrategies();
+    if (!engine.includes(name)) {
+        throw new AppError(400, `No strategy logic found for "${name}". Add its file to python-engine/src/strategies and redeploy the engine first.`);
+    }
+    if (await Strategy.findOne({ name })) throw new AppError(409, `Strategy "${name}" is already registered`);
+
     const strategy = await Strategy.create({
         ...parsed.data,
-        name: parsed.data.name.toLowerCase(),
+        name,
         description: parsed.data.description?.trim() || parsed.data.displayName,
     });
     res.status(201).json({

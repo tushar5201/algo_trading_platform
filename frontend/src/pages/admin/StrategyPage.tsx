@@ -26,12 +26,22 @@ export default function StrategyPage() {
         queryFn:  () => api.get('/admin/users?status=APPROVED').then(r => r.data.data),
     });
 
+    // Strategies that have a logic file in the python engine (a name can only be created if it is listed here)
+    const { data: available, error: availableError } = useQuery({
+        queryKey: ['strategies-available'],
+        queryFn:  () => api.get('/admin/strategies/available').then(r => r.data.data as { name: string; registered: boolean }[]),
+        retry: false,
+    });
+
     const createMutation = useMutation({
         mutationFn: () => api.post('/admin/strategies', newStrat),
         onSuccess:  () => {
             qc.invalidateQueries({ queryKey: ['strategies'] });
+            qc.invalidateQueries({ queryKey: ['strategies-available'] });
             setNewStrat({ name: '', displayName: '', description: '', riskLevel: 'MEDIUM' });
+            setMsg('Strategy created');
         },
+        onError: (e: any) => setMsg(e.response?.data?.message ?? 'Failed to create strategy'),
     });
 
     const assignMutation = useMutation({
@@ -105,8 +115,27 @@ export default function StrategyPage() {
                     <h2 className="text-sm font-semibold text-gray-900 dark:text-white">
                         Create strategy
                     </h2>
+                    <div>
+                        <label className="label">Strategy logic (from engine)</label>
+                        <select
+                            className="input-base"
+                            value={newStrat.name}
+                            onChange={e => setNewStrat(s => ({ ...s, name: e.target.value }))}
+                        >
+                            <option value="">— Choose a strategy file —</option>
+                            {(available ?? []).filter(a => !a.registered).map(a => (
+                                <option key={a.name} value={a.name}>{a.name}</option>
+                            ))}
+                        </select>
+                        <p className="text-xs text-gray-400 mt-1">
+                            {availableError
+                                ? ((availableError as any).response?.data?.message ?? 'Could not load strategies from the engine.')
+                                : (available ?? []).every(a => a.registered)
+                                    ? 'Every strategy file in the engine is already registered. Add a new file to python-engine/src/strategies and redeploy.'
+                                    : 'Only strategies that exist as code in the engine can be created.'}
+                        </p>
+                    </div>
                     {[
-                        { key: 'name',        label: 'Slug (unique)',    ph: 'oi_nifty_options' },
                         { key: 'displayName', label: 'Display name',    ph: 'OI Nifty Options' },
                         { key: 'description', label: 'Description',     ph: 'Strategy description' },
                     ].map(({ key, label, ph }) => (
@@ -134,7 +163,7 @@ export default function StrategyPage() {
                     </div>
                     <button
                         className="btn-primary w-full"
-                        disabled={createMutation.isPending}
+                        disabled={createMutation.isPending || !newStrat.name || !newStrat.displayName}
                         onClick={() => createMutation.mutate()}
                     >
                         <Plus className="w-4 h-4" />

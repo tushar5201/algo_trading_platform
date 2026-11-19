@@ -5,6 +5,7 @@ import { asynchandler } from "../middleware/errorhandler";
 import {
     assignStrategies,
     createStrategy,
+    getAvailableStrategies,
     getAllUsers,
     getHealth, getKillSwitchStatus,
     getQueueStatus,
@@ -32,6 +33,7 @@ router.get('/trades', asynchandler(getAllTrades));
 router.get('/trades/:tradeId', asynchandler(getTradeByIdAdmin));
 
 router.post('/strategies', asynchandler(createStrategy));
+router.get('/strategies/available', asynchandler(getAvailableStrategies));
 router.get('/strategies', asynchandler(listStrategies));
 
 router.post('/users/:userId/trigger-strategy', triggerLimiter, asynchandler(triggerStrategy));
